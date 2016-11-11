@@ -417,7 +417,7 @@ if ("${CMAKE_GENERATOR}" MATCHES "Visual Studio")
   add_dependencies(dynamorio ${arch_core_asm_tgt} ${archshared_core_asm_tgt})
 endif ()
 
-target_link_libraries(dynamorio drhelper)
+target_link_libraries(dynamorio drhelper legacy_stdio_definitions )
 copy_target_to_device(dynamorio)
 
 # rather than a separate BUILD_INCLUDES option we always build
@@ -448,7 +448,7 @@ add_gen_events_deps(${PRELOAD_NAME})
 if ("${CMAKE_GENERATOR}" MATCHES "Visual Studio")
   add_dependencies(${PRELOAD_NAME} ${preinject_asm_tgt})
 endif ()
-target_link_libraries(${PRELOAD_NAME} drhelper)
+target_link_libraries(${PRELOAD_NAME} drhelper libucrt libvcruntime)
 copy_target_to_device(${PRELOAD_NAME})
 
 # static decoding library
@@ -807,9 +807,9 @@ else (UNIX)
   set_target_properties(dynamorio PROPERTIES LINK_FLAGS "${dynamorio_link_flags}")
 
   if (DEBUG)
-    set(WIN32_C_LIB libcmtd)
+    set(WIN32_C_LIB libcmtd libvcruntimed libucrtd legacy_stdio_definitions)
   else (DEBUG)
-    set(WIN32_C_LIB libcmt)
+    set(WIN32_C_LIB libcmt libvcruntime libucrt legacy_stdio_definitions)
   endif (DEBUG)
 
   if (NOT STATIC_LIBRARY)
@@ -893,7 +893,7 @@ if (WIN32)
   # ok w/ libc syms so we re-order and take the static syms first.
   set_target_properties(drinjectlib PROPERTIES LINK_FLAGS "${drinjectlib_link_flags}")
   # I'm adding libcmt to attempt to make sure we have multithreaded C lib:
-  target_link_libraries(drinjectlib drdecode ${WIN32_C_LIB}.lib ntdll_imports
+  target_link_libraries(drinjectlib drdecode ${WIN32_C_LIB} ntdll_imports
     kernel32 advapi32 imagehlp)
   # drinject.exe needs a copy in the bin dir (i#1737 would eliminate this)
   add_custom_command(TARGET drinjectlib POST_BUILD COMMAND ${CMAKE_COMMAND}
