@@ -393,7 +393,7 @@ file_exists(const TCHAR *fn)
         /* special handling for e.g. C:\\ */
         if (LAST_WCHAR(fn) == L'\\' || LAST_WCHAR(fn) == L':') {
             WCHAR buf[MAX_PATH];
-            _snwprintf(buf, MAX_PATH, L"%S%S*",
+            _snwprintf(buf, MAX_PATH, L"%s%s*",
                        fn, LAST_WCHAR(fn) == L'\\' ? L"" : L"\\");
             NULL_TERMINATE_BUFFER(buf);
             search = FindFirstFile(buf, &fd);

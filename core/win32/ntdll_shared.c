@@ -53,8 +53,10 @@
 # pragma warning(disable : 4210) //nonstandard extension used : function given file scope
 # pragma warning( disable : 4204) //nonstandard extension used : non-constant aggregate initializer
 # define INVALID_FILE INVALID_HANDLE_VALUE
-# define snprintf   _snprintf
-# include <stdio.h> /* _snprintf */
+# if (_MSC_VER) < 1700
+#  define snprintf   _snprintf
+#  include <stdio.h> /* _snprintf */
+# endif
 # define STATUS_NOT_IMPLEMENTED           ((NTSTATUS)0xC0000002L)
 #else
 /* we include globals.h mainly for ASSERT, even though we're

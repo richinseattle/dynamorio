@@ -375,12 +375,12 @@ BOOL CDynamoRIOView::UpdateProcessList()
  * up to hundreds of billions, and we shrunk stat names by 3 to 47.
  */
 /* SZFC is 2 literals => _T only gets first, so we manually construct: */
-# define CLIENT_STAT_PFMT _T("%13")_T(INT64_FORMAT)_T("u")
-# define DR_STAT_PFMT _T("%10")_T(INT64_FORMAT)_T("u")
+# define CLIENT_STAT_PFMT _T("%13") _T(INT64_FORMAT) _T("u")
+# define DR_STAT_PFMT _T("%10") _T(INT64_FORMAT) _T("u")
 #else
 /* 13 is beyond 32-bit reach but this lines everything up and is consistent w/ x64 */
-# define CLIENT_STAT_PFMT _T("%13")_T(SZFC)
-# define DR_STAT_PFMT _T("%10")_T(SZFC)
+# define CLIENT_STAT_PFMT _T("%13") _T(SZFC)
+# define DR_STAT_PFMT _T("%10") _T(SZFC)
 #endif
 
 uint CDynamoRIOView::PrintStat(TCHAR *c, uint i, BOOL filter)
