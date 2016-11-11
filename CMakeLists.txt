@@ -831,7 +831,7 @@ else (UNIX)
   # VS2010 has /MD as the default (and does declspec(dllimport) for
   # libc routines) so make sure we explicitly request /MT
   set(BASE_CFLAGS "${BASE_CFLAGS} /MT")
-  set(WARN "/W4 /WX")
+  set(WARN "/W4")
   # Default from cmake has /W3 so remove to avoid warning about overriding
   string(REGEX REPLACE "/W[0-9]" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
   string(REGEX REPLACE "/W[0-9]" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")

@@ -140,7 +140,7 @@ else (UNIX)
     add_executable(${tgt} ${tgt}.c ${RESOURCES})
 
     if ("${tgt}" STREQUAL "ldmp")
-      set(extra_lib libcmt ntdll_imports)
+      set(extra_lib libcmt libvcruntime libucrt ntdll_imports legacy_stdio_definitions)
     endif ("${tgt}" STREQUAL "ldmp")
     target_link_libraries(${tgt}
       policy_static user32 advapi32 pdh imagehlp shell32 ${extra_lib})
