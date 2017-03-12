@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2013-2016 Google, Inc.   All rights reserved.
+ * Copyright (c) 2013-2017 Google, Inc.   All rights reserved.
  * **********************************************************/
 
 /*
@@ -434,6 +434,31 @@ DR_EXPORT
 /** Retrieves the capacity of the buffer. */
 size_t
 drx_buf_get_buffer_size(void *drcontext, drx_buf_t *buf);
+
+DR_EXPORT
+/**
+ * Pads a basic block with a label at the end for routines which rely on inserting
+ * instrumentation after every instruction. Note that users of this routine must act on
+ * the previous instruction in basic block events before skipping non-app instructions
+ * because the label is not marked as an app instruction.
+ *
+ * \note the padding label is not introduced if the basic block is already branch
+ * terminated.
+ *
+ * \returns whether padding was introduced.
+ */
+bool
+drx_tail_pad_block(void *drcontext, instrlist_t *ilist);
+
+DR_EXPORT
+/**
+ * Constructs a memcpy-like operation that is compatible with drx_buf.
+ *
+ * \note drx_buf_insert_buf_memcpy() will increment the buffer pointer internally.
+ */
+void
+drx_buf_insert_buf_memcpy(void *drcontext, drx_buf_t *buf, instrlist_t *ilist,
+                          instr_t *where, reg_id_t dst, reg_id_t src, ushort len);
 
 /*@}*/ /* end doxygen group */
 

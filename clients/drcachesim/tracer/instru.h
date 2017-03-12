@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2017 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -65,8 +65,9 @@ public:
     virtual int append_tid(byte *buf_ptr, thread_id_t tid) = 0;
     virtual int append_thread_exit(byte *buf_ptr, thread_id_t tid) = 0;
     virtual int append_iflush(byte *buf_ptr, addr_t start, size_t size) = 0;
+    virtual int append_thread_header(byte *buf_ptr, thread_id_t tid) = 0;
     // This is a per-buffer-writeout header.
-    virtual int append_header(byte *buf_ptr, thread_id_t tid) = 0;
+    virtual int append_unit_header(byte *buf_ptr, thread_id_t tid) = 0;
 
     // These insert inlined code to add an entry into the trace buffer.
     virtual int instrument_memref(void *drcontext, instrlist_t *ilist, instr_t *where,
@@ -113,7 +114,8 @@ public:
     virtual int append_tid(byte *buf_ptr, thread_id_t tid);
     virtual int append_thread_exit(byte *buf_ptr, thread_id_t tid);
     virtual int append_iflush(byte *buf_ptr, addr_t start, size_t size);
-    virtual int append_header(byte *buf_ptr, thread_id_t tid);
+    virtual int append_thread_header(byte *buf_ptr, thread_id_t tid);
+    virtual int append_unit_header(byte *buf_ptr, thread_id_t tid);
 
     virtual int instrument_memref(void *drcontext, instrlist_t *ilist, instr_t *where,
                                   reg_id_t reg_ptr, reg_id_t reg_tmp, int adjust,
@@ -144,6 +146,9 @@ class offline_instru_t : public instru_t
 public:
     offline_instru_t(void (*insert_load_buf)(void *, instrlist_t *,
                                              instr_t *, reg_id_t),
+                     ssize_t (*write_file)(file_t file,
+                                           const void *data,
+                                           size_t count),
                      file_t module_file);
     virtual ~offline_instru_t();
 
@@ -158,7 +163,8 @@ public:
     virtual int append_tid(byte *buf_ptr, thread_id_t tid);
     virtual int append_thread_exit(byte *buf_ptr, thread_id_t tid);
     virtual int append_iflush(byte *buf_ptr, addr_t start, size_t size);
-    virtual int append_header(byte *buf_ptr, thread_id_t tid);
+    virtual int append_thread_header(byte *buf_ptr, thread_id_t tid);
+    virtual int append_unit_header(byte *buf_ptr, thread_id_t tid);
 
     virtual int instrument_memref(void *drcontext, instrlist_t *ilist, instr_t *where,
                                   reg_id_t reg_ptr, reg_id_t reg_tmp, int adjust,
@@ -174,11 +180,17 @@ public:
     virtual void bb_analysis(void *drcontext, void *tag, void **bb_field,
                              instrlist_t *ilist, bool repstr_expanded);
 
+    static bool custom_module_data(void * (*load_cb)(module_data_t *module),
+                                   int (*print_cb)(void *data, char *dst,
+                                                   size_t max_len),
+                                   void (*free_cb)(void *data));
+
 private:
     void insert_save_pc(void *drcontext, instrlist_t *ilist, instr_t *where,
                         reg_id_t reg_ptr, reg_id_t scratch, int adjust, uint64_t value);
     void insert_save_addr(void *drcontext, instrlist_t *ilist, instr_t *where,
                           reg_id_t reg_ptr, reg_id_t reg_addr, int adjust, opnd_t ref);
+    ssize_t (*write_file_func)(file_t file, const void *data, size_t count);
     file_t modfile;
 };
 

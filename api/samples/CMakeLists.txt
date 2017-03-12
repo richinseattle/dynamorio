@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010-2016 Google, Inc.    All rights reserved.
+# Copyright (c) 2010-2017 Google, Inc.    All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.    All rights reserved.
 # **********************************************************
 
@@ -203,19 +203,20 @@ configure_DynamoRIO_global(OFF ON)
 
 # Use ;-separated lists for source files and extensions.
 
-if (NOT AARCH64) # FIXME i#1569: port to AArch64
-  add_sample_client(bbbuf       "bbbuf.c"         "drmgr;drreg")
-endif ()
+add_sample_client(bbbuf       "bbbuf.c"         "drmgr;drreg;drx")
+add_sample_client(bbcount     "bbcount.c"       "drmgr;drreg;drx")
 add_sample_client(bbsize      "bbsize.c"        "drmgr")
 add_sample_client(empty       "empty.c"         "")
 add_sample_client(memtrace_simple "memtrace_simple.c;utils.c" "drmgr;drreg;drutil;drx")
 add_sample_client(instrace_simple "instrace_simple.c;utils.c" "drmgr;drreg;drx")
 if (X86) # FIXME i#1551, i#1569: port to ARM and AArch64
-  add_sample_client(bbcount     "bbcount.c"       "drmgr;drreg")
   add_sample_client(cbr         "cbr.c"           "drmgr")
   add_sample_client(countcalls  "countcalls.c"    "drmgr;drreg")
-  add_sample_client(div         "div.c"           "drmgr")
-  add_sample_client(inc2add     "inc2add.c"       "")
+endif (X86)
+add_sample_client(div         "div.c"           "drmgr")
+if (X86) # FIXME i#1551, i#1569: port to ARM and AArch64
+  add_sample_client(inc2add     "inc2add.c"       "drmgr;drreg")
+  add_sample_client(memval_simple       "memval_simple.c;utils.c" "drmgr;drreg;drutil;drx")
   add_sample_client(memtrace_x86_binary "memtrace_x86.c;utils.c"
     "drcontainers;drmgr;drreg;drutil;drx")
   add_sample_client(memtrace_x86_text   "memtrace_x86.c;utils.c"
@@ -231,27 +232,25 @@ if (X86) # FIXME i#1551, i#1569: port to ARM and AArch64
     add_sample_client(ssljack     "ssljack.c"       "drmgr;drwrap")
   endif (NOT WIN32)
   # dr_insert_mbr_instrumentation is NYI
-  add_sample_client(modxfer     "modxfer.c;utils.c"     "drx")
-  add_sample_client(modxfer_app2lib "modxfer_app2lib.c" "")
+  add_sample_client(modxfer     "modxfer.c;utils.c"     "drmgr;drreg;drx")
+  add_sample_client(modxfer_app2lib "modxfer_app2lib.c" "drmgr")
   add_sample_client(instrcalls  "instrcalls.c;utils.c"  "drmgr;drsyms;drx")
   # dr_insert_cbr_instrument_ex is NYI
-  add_sample_client(cbrtrace    "cbrtrace.c;utils.c"    "drx")
+  add_sample_client(cbrtrace    "cbrtrace.c;utils.c"    "drmgr;drx")
 endif (X86)
 add_sample_client(wrap        "wrap.c"          "drmgr;drwrap")
 add_sample_client(signal      "signal.c"        "drmgr")
 add_sample_client(syscall     "syscall.c"       "drmgr")
-add_sample_client(inline      "inline.c"        "")
-add_sample_client(inscount    "inscount.c"      "drmgr")
-if (NOT AARCH64) # FIXME i#1569: port to AArch64
-  add_sample_client(opcodes     "opcodes.c"       "drx")
-endif ()
+add_sample_client(inline      "inline.c"        "drmgr;drcontainers")
+add_sample_client(inscount    "inscount.cpp"    "drmgr;droption")
+add_sample_client(opcodes     "opcodes.c"       "drmgr;drreg;drx")
 add_sample_client(stl_test    "stl_test.cpp"    "")
 # add utils.h for installation  # NON-PUBLIC
 set(srcs ${srcs} "utils.h")     # NON-PUBLIC
 
 if (WIN32)
   # This client is Windows-only.
-  add_sample_client(stats     "stats.c;utils.c"         "drx")
+  add_sample_client(stats     "stats.c;utils.c"         "drmgr;drreg;drx")
 
   # XXX i#893: drwrap's asm isn't SEH compliant.
   _DR_append_property_string(TARGET wrap LINK_FLAGS "/safeseh:no")

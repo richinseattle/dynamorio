@@ -42,6 +42,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <setjmp.h>
 
 #define ALT_STACK_SIZE  (SIGSTKSZ*2)
 
@@ -52,12 +53,17 @@ static void *thread_ready;
 static void *thread_exit;
 static void *got_signal;
 
+SIGJMP_BUF mark;
+
 static void
 signal_handler(int sig, siginfo_t *siginfo, ucontext_t *ucxt)
 {
     if (sig == SIGUSR1) {
         print("Got SIGUSR1\n");
         signal_cond_var(got_signal);
+    } else if (sig == SIGSEGV) {
+        print("Got SIGSEGV\n");
+        SIGLONGJMP(mark, 1);
     } else {
         print("Got unexpected signal %d\n", sig);
     }
@@ -127,6 +133,7 @@ main(int argc, const char *argv[])
 {
     pthread_t thread;
     intercept_signal(SIGUSR1, signal_handler, true/*sigstack*/);
+    intercept_signal(SIGSEGV, signal_handler, true/*sigstack*/);
     thread_ready = create_cond_var();
     thread_exit = create_cond_var();
     got_signal = create_cond_var();
@@ -159,6 +166,10 @@ main(int argc, const char *argv[])
     wait_cond_var(got_signal);
     reset_cond_var(got_signal);
 
+    print("pre-raise SIGSEGV under DR\n");
+    if (SIGSETJMP(mark) == 0)
+        *(int *)0x42 = 0;
+
     print("pre-DR stop\n");
     // i#95: today we don't have full support for separating stop from cleanup:
     // we rely on the app joining threads prior to cleanup.
@@ -170,6 +181,10 @@ main(int argc, const char *argv[])
     pthread_kill(thread, SIGUSR1);
     wait_cond_var(got_signal);
     reset_cond_var(got_signal);
+
+    print("pre-raise SIGSEGV native\n");
+    if (SIGSETJMP(mark) == 0)
+        *(int *)0x42 = 0;
 
     signal_cond_var(thread_exit);
     pthread_join(thread, NULL);

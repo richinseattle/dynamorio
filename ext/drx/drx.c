@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2013-2016 Google, Inc.   All rights reserved.
+ * Copyright (c) 2013-2017 Google, Inc.   All rights reserved.
  * **********************************************************/
 
 /*
@@ -53,6 +53,8 @@
 # include <signal.h> /* SIGKILL */
 #endif
 
+#include <limits.h>
+
 #ifdef DEBUG
 # define ASSERT(x, msg) DR_ASSERT_MSG(x, msg)
 # define IF_DEBUG(x) x
@@ -101,6 +103,13 @@ DR_EXPORT
 bool
 drx_init(void)
 {
+    /* drx_insert_counter_update() needs 1 slot on x86 plus the 1 slot
+       drreg uses for aflags, and 2 reg slots on aarch, so 2 on both.
+     * We set do_not_sum_slots to true so that we only ask for *more* slots
+     * if the client doesn't ask for any.
+     */
+    drreg_options_t ops = {sizeof(ops), 2, false, NULL, true};
+
     int count = dr_atomic_add32_return_sum(&drx_init_count, 1);
     if (count > 1)
         return true;
@@ -108,6 +117,9 @@ drx_init(void)
     drmgr_init();
     note_base = drmgr_reserve_note_range(DRX_NOTE_COUNT);
     ASSERT(note_base != DRMGR_NOTE_NONE, "failed to reserve note range");
+
+    if (drreg_init(&ops) != DRREG_SUCCESS)
+        return false;
 
     return drx_buf_init_library();
 }
@@ -124,6 +136,7 @@ drx_exit()
         soft_kills_exit();
 
     drx_buf_exit_library();
+    drreg_exit();
     drmgr_exit();
 }
 
@@ -400,7 +413,11 @@ drx_insert_counter_update(void *drcontext, instrlist_t *ilist, instr_t *where,
     reg_id_t reg1, reg2;
 #endif
     bool is_64 = TEST(DRX_COUNTER_64BIT, flags);
-
+    /* Requires drx_init(), where it didn't when first added. */
+    if (drx_init_count == 0) {
+        ASSERT(false, "drx_insert_counter_update requires drx_init");
+        return false;
+    }
     if (drcontext == NULL) {
         ASSERT(false, "drcontext cannot be NULL");
         return false;
@@ -454,7 +471,7 @@ drx_insert_counter_update(void *drcontext, instrlist_t *ilist, instr_t *where,
     instr = INSTR_CREATE_add(drcontext,
                              OPND_CREATE_ABSMEM
                              (addr, IF_X64_ELSE((is_64 ? OPSZ_8 : OPSZ_4), OPSZ_4)),
-                             OPND_CREATE_INT32(value));
+                             OPND_CREATE_INT_32OR8(value));
     if (TEST(DRX_COUNTER_LOCK, flags))
         instr = LOCK(instr);
     MINSERT(ilist, where, instr);
@@ -1371,4 +1388,17 @@ drx_open_unique_appid_dir(const char *dir, ptr_int_t id,
         }
     }
     return false;
+}
+
+bool
+drx_tail_pad_block(void *drcontext, instrlist_t *ilist)
+{
+    instr_t *last = instrlist_last_app(ilist);
+
+    if (instr_is_cti(last) || instr_is_syscall(last)) {
+        /* This basic block is already branch or syscall-terminated */
+        return false;
+    }
+    instrlist_meta_postinsert(ilist, last, INSTR_CREATE_label(drcontext));
+    return true;
 }

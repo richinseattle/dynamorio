@@ -138,7 +138,17 @@ dispatch(dcontext_t *dcontext)
     fragment_t coarse_f;
 
 #ifdef HAVE_TLS
-    ASSERT(dcontext == get_thread_private_dcontext());
+# if defined(UNIX) && defined(X86)
+    /* i#2089: the parent of a new thread has TLS in an unstable state
+     * and needs to restore it prior to invoking get_thread_private_dcontext().
+     */
+    if (get_at_syscall(dcontext) && was_thread_create_syscall(dcontext))
+        os_clone_post(dcontext);
+# endif
+    ASSERT(dcontext == get_thread_private_dcontext() ||
+           /* i#813: the app hit our post-sysenter hook while native */
+           (dcontext->whereami == WHERE_APP &&
+            dcontext->last_exit == get_syscall_linkstub()));
 #else
 # ifdef UNIX
     /* CAUTION: for !HAVE_TLS, upon a fork, the child's
@@ -683,7 +693,7 @@ dispatch_enter_native(dcontext_t *dcontext)
         dcontext->native_exec_postsyscall = NULL;
         LOG(THREAD, LOG_DISPATCH, 2, "Entry into native_exec after intercepted syscall\n");
         /* restore state as though never came out for syscall */
-        KSTOP_NOT_MATCHING(dispatch_num_exits);
+        KSTOP_NOT_MATCHING_DC(dcontext, dispatch_num_exits);
 #ifdef KSTATS
         if (!dcontext->currently_stopped)
             KSTART_DC(dcontext, fcache_default);
@@ -863,6 +873,15 @@ dispatch_enter_dynamorio(dcontext_t *dcontext)
         else if (TEST(LINK_CALLBACK_RETURN, dcontext->last_exit->flags)) {
             handle_callback_return(dcontext);
             ASSERT_NOT_REACHED();
+        }
+#endif
+
+#ifdef AARCH64
+        if (dcontext->last_exit == get_selfmod_linkstub()) {
+            app_pc begin = (app_pc)dcontext->local_state->spill_space.r2;
+            app_pc end = (app_pc)dcontext->local_state->spill_space.r3;
+            dcontext->next_tag = (app_pc)dcontext->local_state->spill_space.r4;
+            flush_fragments_from_region(dcontext, begin, end - begin, true);
         }
 #endif
 
@@ -1259,7 +1278,7 @@ dispatch_exit_fcache_stats(dcontext_t *dcontext)
         return;
     }
     else if (dcontext->last_exit == get_selfmod_linkstub()) {
-        LOG(THREAD, LOG_DISPATCH, 2, "Exit from fragment that self-flushed via code mod\n");
+        LOG(THREAD, LOG_DISPATCH, 2, "Exit from fragment via code mod\n");
         STATS_INC(num_exits_code_mod_flush);
         KSWITCH_STOP_NOT_PROPAGATED(fcache_default);
         return;
@@ -2059,6 +2078,7 @@ handle_system_call(dcontext_t *dcontext)
             ASSERT_NOT_REACHED();
     }
     else {
+        LOG(THREAD, LOG_DISPATCH, 2, "Skipping actual syscall invocation\n");
 #ifdef CLIENT_INTERFACE
         /* give the client its post-syscall event since we won't be calling
          * post_system_call(), unless the client itself was the one who skipped.

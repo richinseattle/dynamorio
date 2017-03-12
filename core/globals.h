@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2017 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -365,8 +365,13 @@ typedef struct _client_flush_req_t {
  * NULL during thread startup or teardown (i.e. mutex_wait_contended_lock() usage) */
 #define IS_CLIENT_THREAD(dcontext) \
     ((dcontext) != NULL && dcontext != GLOBAL_DCONTEXT && \
-     (dcontext)->client_data != NULL && \
-     (dcontext)->client_data->is_client_thread)
+     (dcontext)->client_data != NULL && (dcontext)->client_data->is_client_thread)
+#ifdef DEBUG
+/* For use after dcontext->client_data is NULL */
+# define IS_CLIENT_THREAD_EXITING(dcontext)               \
+    ((dcontext) != NULL && dcontext != GLOBAL_DCONTEXT && \
+     (dcontext)->is_client_thread_exiting)
+#endif
 
 /* Client interface-specific data for dcontexts */
 typedef struct _client_data_t {
@@ -444,6 +449,8 @@ extern bool dynamo_exited;       /* has dynamo exited? */
 extern bool dynamo_exited_and_cleaned; /* has dynamo component cleanup started? */
 #ifdef DEBUG
 extern bool dynamo_exited_log_and_stats; /* are stats and logfile shut down? */
+/* process exit in middle of any thread init? */
+extern bool dynamo_thread_init_during_process_exit;
 #endif
 extern bool dynamo_resetting;    /* in middle of global reset? */
 extern bool dynamo_all_threads_synched; /* are all other threads suspended safely? */
@@ -510,10 +517,12 @@ extern bool    dr_api_entry;
 extern bool    dr_api_exit;
 
 /* in dynamo.c */
-/* 9-bit addressed hash table takes up 2K, has capacity of 512
- * we never resize, assuming won't be seeing more than a few hundred threads
+/* 12-bit addressed hash table takes up 16K, has capacity of 4096.
+ * XXX: We currently never resize, assuming won't be seeing more than
+ * a few thousand threads: it should be simple to swap for a resizing
+ * table using generic_table_t though.
  */
-#define ALL_THREADS_HASH_BITS 9
+#define ALL_THREADS_HASH_BITS 12
 extern thread_record_t **all_threads;
 extern mutex_t all_threads_lock;
 DYNAMORIO_EXPORT int dynamorio_app_init(void);
@@ -565,6 +574,7 @@ int dynamo_shared_exit(thread_record_t *toexit
 void dynamo_process_exit_with_thread_info(void);
 /* thread cleanup prior to clean exit event */
 void dynamo_thread_exit_pre_client(dcontext_t *dcontext, thread_id_t id);
+void dynamo_exit_post_detach(void);
 
 /* enter/exit DR hooks */
 void entering_dynamorio(void);
@@ -930,6 +940,10 @@ struct _dcontext_t {
 #ifdef CLIENT_INTERFACE
     /* client interface-specific data */
     client_data_t *client_data;
+# ifdef DEBUG
+    /* i#2237: on exit we delete client_data before some IS_CLIENT_THREAD asserts. */
+    bool is_client_thread_exiting;
+# endif
 #endif
 
     /* FIXME trace_sysenter_exit is used to capture an exit from a trace that

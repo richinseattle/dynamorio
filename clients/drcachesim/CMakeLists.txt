@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2015-2016 Google, Inc.    All rights reserved.
+# Copyright (c) 2015-2017 Google, Inc.    All rights reserved.
 # **********************************************************
 
 # Redistribution and use in source and binary forms, with or without
@@ -34,11 +34,24 @@ include(../../make/policies.cmake NO_POLICY_SCOPE)
 
 if (WIN32)
   set(os_name "win")
+  # Our non-client files assume this is set, yet don't include headers that set it.
+  add_definitions(-DWINDOWS)
 else ()
   set(os_name "unix")
-  # Our non-client files assume this is set, yet don't include headers that set it.
+  # Ditto.
   add_definitions(-DUNIX)
 endif ()
+
+# i#2277: we use zlib if available to read compressed trace files.
+# XXX: we could ship with a zlib for Windows: today we simply don't support
+# compressed traces on Windows.
+if (ZLIB_FOUND)
+  add_definitions(-DHAS_ZLIB)
+  include_directories(${ZLIB_INCLUDE_DIRS})
+  set(zlib_reader reader/compressed_file_reader.cpp)
+else ()
+  set(zlib_reader "")
+endif()
 
 set(client_and_sim_srcs
   common/named_pipe_${os_name}.cpp
@@ -48,10 +61,13 @@ set(client_and_sim_srcs
 add_executable(drcachesim
   launcher.cpp
   analyzer.cpp
+  analyzer_multi.cpp
   ${client_and_sim_srcs}
   reader/reader.cpp
   reader/file_reader.cpp
+  ${zlib_reader}
   reader/ipc_reader.cpp
+  simulator/analyzer_interface.cpp
   simulator/simulator.cpp
   simulator/cache.cpp
   simulator/cache_lru.cpp
@@ -78,6 +94,35 @@ use_DynamoRIO_extension(drcachesim droption)
 # These are also for raw2trace:
 use_DynamoRIO_extension(drcachesim drcovlib_static)
 use_DynamoRIO_extension(drcachesim drutil_static)
+
+# This is to avoid common/ in analysis_tool.h's include of memref.h, to make
+# it easier for installation of needed tool headers into a single dir.
+include_directories(common)
+
+set(file_analyzer_tool_srcs
+  analyzer.cpp
+  common/trace_entry.cpp
+  reader/reader.cpp
+  reader/file_reader.cpp
+  ${zlib_reader}
+  )
+
+# We show one example of how to create a standalone analyzer of trace
+# files that does not need to link with DR.
+# i#2006: the final method for supporting 3rd-party tools is not yet decided.
+add_executable(drmemtrace_histogram
+  ${file_analyzer_tool_srcs}
+  tools/histogram.cpp
+  tools/histogram_launcher.cpp
+  )
+target_link_libraries(drmemtrace_histogram drfrontendlib)
+use_DynamoRIO_extension(drmemtrace_histogram droption)
+add_dependencies(drmemtrace_histogram api_headers)
+
+if (ZLIB_FOUND)
+  target_link_libraries(drcachesim ${ZLIB_LIBRARIES})
+  target_link_libraries(drmemtrace_histogram ${ZLIB_LIBRARIES})
+endif ()
 
 macro(add_drmemtrace name type)
   if (${type} STREQUAL "STATIC")
@@ -106,6 +151,7 @@ endmacro()
 
 add_drmemtrace(drmemtrace SHARED)
 add_drmemtrace(drmemtrace_static STATIC)
+install_client_header(tracer/drmemtrace.h)
 
 add_executable(drraw2trace
   tracer/raw2trace_launcher.cpp
@@ -137,6 +183,7 @@ endmacro()
 
 restore_nonclient_flags(drcachesim)
 restore_nonclient_flags(drraw2trace)
+restore_nonclient_flags(drmemtrace_histogram)
 
 # We need to pass /EHsc and we pull in libcmtd into drcachesim from a dep lib.
 # Thus we need to override the /MT with /MTd.
@@ -144,7 +191,7 @@ macro(add_win32_flags target)
   if (WIN32)
     if (DEBUG)
       get_property(cur TARGET ${target} PROPERTY COMPILE_FLAGS)
-      string(REPLACE "/MT " "" cur ${cur}) # Avoid override warning.
+      string(REPLACE "/MT " "" cur "${cur}") # Avoid override warning.
       set_target_properties(${target} PROPERTIES COMPILE_FLAGS "${cur} /EHsc /MTd")
       append_property_string(TARGET ${target} LINK_FLAGS "/nodefaultlib:libcmt")
     else ()
@@ -155,6 +202,7 @@ endmacro ()
 
 add_win32_flags(drcachesim)
 add_win32_flags(drraw2trace)
+add_win32_flags(drmemtrace_histogram)
 if (WIN32 AND DEBUG)
   get_target_property(sim_srcs drcachesim SOURCES)
   get_target_property(raw2trace_srcs drraw2trace SOURCES)
@@ -220,7 +268,7 @@ if (WIN32)
   # drcachesim needs these dlls (i#1737 would eliminate this)
   get_target_property(injectlib_loc drinjectlib LOCATION${location_suffix})
   DR_install(FILES "${injectlib_loc}"  DESTINATION "${INSTALL_CLIENTS_BIN}")
-  get_target_property(configlib_loc drinjectlib LOCATION${location_suffix})
+  get_target_property(configlib_loc drconfiglib LOCATION${location_suffix})
   DR_install(FILES "${configlib_loc}"  DESTINATION "${INSTALL_CLIENTS_BIN}")
   add_custom_command(TARGET drcachesim POST_BUILD
     COMMAND ${CMAKE_COMMAND} ARGS -E copy ${DR_LIBRARY_BASE_DIRECTORY}/drinjectlib.dll
@@ -245,11 +293,38 @@ if (BUILD_TESTS)
     use_DynamoRIO_static_client(tool.drcacheoff.burst_static drmemtrace_static)
     add_win32_flags(tool.drcacheoff.burst_static)
 
+    add_executable(tool.drcacheoff.burst_replace tests/burst_replace.cpp)
+    configure_DynamoRIO_static(tool.drcacheoff.burst_replace)
+    use_DynamoRIO_static_client(tool.drcacheoff.burst_replace drmemtrace_static)
+    add_win32_flags(tool.drcacheoff.burst_replace)
+    # Not really using an extension, just for including drmemtrace.h.
+    use_DynamoRIO_extension(tool.drcacheoff.burst_replace drmemtrace_static)
+    use_DynamoRIO_extension(tool.drcacheoff.burst_replace drcovlib_static)
+
+    add_executable(tool.drcacheoff.burst_replaceall tests/burst_replaceall.cpp)
+    configure_DynamoRIO_static(tool.drcacheoff.burst_replaceall)
+    use_DynamoRIO_static_client(tool.drcacheoff.burst_replaceall drmemtrace_static)
+    add_win32_flags(tool.drcacheoff.burst_replaceall)
+    use_DynamoRIO_extension(tool.drcacheoff.burst_replaceall drcontainers)
+    # Not really using an extension, just for including drmemtrace.h.
+    use_DynamoRIO_extension(tool.drcacheoff.burst_replaceall drmemtrace_static)
+
     add_executable(tool.drcacheoff.burst_threads tests/burst_threads.cpp)
     configure_DynamoRIO_static(tool.drcacheoff.burst_threads)
     use_DynamoRIO_static_client(tool.drcacheoff.burst_threads drmemtrace_static)
     add_win32_flags(tool.drcacheoff.burst_threads)
     target_link_libraries(tool.drcacheoff.burst_threads ${libpthread})
+
+    # FIXME i#2099: the weak symbol is not supported on Windows.
+    if (UNIX)
+      add_executable(tool.drcacheoff.burst_client tests/burst_static.cpp)
+      append_property_list(TARGET tool.drcacheoff.burst_client
+        COMPILE_DEFINITIONS "TEST_APP_DR_CLIENT_MAIN")
+      configure_DynamoRIO_static(tool.drcacheoff.burst_client)
+      use_DynamoRIO_static_client(tool.drcacheoff.burst_client drmemtrace_static)
+      # A nop, keep it for the furture Windows support.
+      add_win32_flags(tool.drcacheoff.burst_client)
+    endif ()
   endif ()
 endif ()
 

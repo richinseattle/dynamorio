@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2017 Google, Inc.  All rights reserved.
  * Copyright (c) 2001-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -1400,15 +1400,21 @@ vmm_heap_exit()
                detach
             */
             ASSERT(IF_WINDOWS(doing_detach || )  /* not deterministic when detaching */
+                   /* FIXME i#2075: if a thread is being initialized during the
+                    * process exit, the thread will not free its dstack.
+                    */
+                   IF_DEBUG(dynamo_thread_init_during_process_exit || )
                    heapmgt->vmheap.num_free_blocks == heapmgt->vmheap.num_blocks
                    - unfreed_blocks ||
                    /* >=, not ==, b/c if we hit the vmm limit the cur dstack
-                    * could be outside of vmm (i#1164)
+                    * could be outside of vmm (i#1164).
                     */
-                   (ever_beyond_vmm && heapmgt->vmheap.num_free_blocks >=
+                   ((ever_beyond_vmm
+                     /* This also happens for dstacks up high for DrMi#1723. */
+                     IF_WINDOWS(|| get_os_version() >= WINDOWS_VERSION_8_1)) &&
+                    heapmgt->vmheap.num_free_blocks >=
                     heapmgt->vmheap.num_blocks - unfreed_blocks));
         });
-
         /* FIXME: On process exit we are currently executing off a
          *  stack in this region so we cannot free the whole allocation.
 
@@ -1668,6 +1674,9 @@ heap_exit()
 #ifdef X64
     DELETE_LOCK(request_region_be_heap_reachable_lock);
 #endif
+
+    if (doing_detach)
+        heapmgt = &temp_heapmgt;
 }
 
 /* FIXME:

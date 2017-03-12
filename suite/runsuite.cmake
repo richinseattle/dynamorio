@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010-2016 Google, Inc.    All rights reserved.
+# Copyright (c) 2010-2017 Google, Inc.    All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.    All rights reserved.
 # **********************************************************
 
@@ -58,7 +58,7 @@ endforeach (arg)
 if (arg_travis)
   # XXX i#1801, i#1962: under clang we have several failing tests.  Until those are
   # fixed, our Travis clang suite only builds and does not run tests.
-  if (NOT APPLE AND $ENV{CC} MATCHES "clang")
+  if (UNIX AND NOT APPLE AND "$ENV{CC}" MATCHES "clang")
     set(run_tests OFF)
     message("Detected a Travis clang suite: disabling running of tests")
   endif ()
@@ -131,13 +131,15 @@ else ()
             OUTPUT_VARIABLE git_out)
         endif ()
         if (git_result OR git_err)
-          message(FATAL_ERROR "*** ${GIT} remote -v failed: ***\n${git_err}")
+          # Not a fatal error as this can happen when mixing cygwin and windows git.
+          message(STATUS "${GIT} remote -v failed: ${git_err}")
+          set(git_out OFF)
         endif (git_result OR git_err)
         if (NOT git_out)
           # No remotes set up: we assume this is a custom git setup that
           # is only likely to get used on our buildbots, so we skip
           # the diff checks.
-          message("No remotes set up so cannot diff and must skip content checks.  Assuming this is a buildbot.")
+          message(STATUS "No remotes set up so cannot diff and must skip content checks.  Assuming this is a buildbot.")
           set(diff_contents "")
         else ()
           message(FATAL_ERROR "*** Unable to retrieve diff for content checks: do you have a custom remote setup?")
@@ -192,12 +194,17 @@ if (NOT cross_only)
     BUILD_TESTS:BOOL=ON
     ${install_path_cache}
     " OFF ON "${install_build_args}")
+  if (last_build_dir MATCHES "-32")
+    set(32bit_path "TEST_32BIT_PATH:PATH=${last_build_dir}/suite/tests/bin")
+  else ()
+    set(32bit_path "")
+  endif ()
   testbuild_ex("debug-internal-64" ON "
     DEBUG:BOOL=ON
     INTERNAL:BOOL=ON
     BUILD_TESTS:BOOL=ON
     ${install_path_cache}
-    TEST_32BIT_PATH:PATH=${last_build_dir}/suite/tests/bin
+    ${32bit_path}
     " OFF ON "${install_build_args}")
   # we don't really support debug-external anymore
   if (DO_ALL_BUILDS_NOT_SUPPORTED)
@@ -215,11 +222,16 @@ if (NOT cross_only)
     INTERNAL:BOOL=OFF
     ${install_path_cache}
     " OFF OFF "${install_build_args}")
+  if (last_build_dir MATCHES "-32")
+    set(32bit_path "TEST_32BIT_PATH:PATH=${last_build_dir}/suite/tests/bin")
+  else ()
+    set(32bit_path "")
+  endif ()
   testbuild_ex("release-external-64" ON "
     DEBUG:BOOL=OFF
     INTERNAL:BOOL=OFF
     ${install_path_cache}
-    TEST_32BIT_PATH:PATH=${last_build_dir}/suite/tests/bin
+    ${32bit_path}
     " OFF OFF "${install_build_args}")
   if (DO_ALL_BUILDS)
     # we rarely use internal release builds but keep them working in long
@@ -301,12 +313,12 @@ if (UNIX AND ARCH_IS_X86)
     INTERNAL:BOOL=OFF
     CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-arm32.cmake
     " OFF OFF "")
-  testbuild_ex("arm-debug-internal-64" OFF "
+  testbuild_ex("arm-debug-internal-64" ON "
     DEBUG:BOOL=ON
     INTERNAL:BOOL=ON
     CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-arm64.cmake
     " OFF OFF "")
-  testbuild_ex("arm-release-external-64" OFF "
+  testbuild_ex("arm-release-external-64" ON "
     DEBUG:BOOL=OFF
     INTERNAL:BOOL=OFF
     CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-arm64.cmake

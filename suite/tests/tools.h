@@ -324,8 +324,8 @@ int code_self_mod(int iters);
 int code_inc(int foo);
 int code_dec(int foo);
 int dummy(void);
-#ifdef ARM
-void flush_icache(byte *start, byte *end);
+#ifdef AARCHXX
+void tools_clear_icache(void *start, void *end);
 #endif
 
 /* This function implements a trampoline that portably gets its return address
@@ -450,8 +450,8 @@ copy_to_buf_normal(char *buf, size_t buf_len, size_t *copied_len, Code_Snippet f
         len = buf_len;
     }
     memcpy(buf, start, len);
-#if defined(LINUX) && defined(ARM)
-    flush_icache((byte *)buf, (byte *)buf + len);
+#if defined(LINUX) && defined(AARCHXX)
+    tools_clear_icache(buf, buf + len);
 #endif
     if (copied_len != NULL)
         *copied_len = len;

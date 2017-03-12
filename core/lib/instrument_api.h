@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2017 Google, Inc.  All rights reserved.
  * Copyright (c) 2002-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -2099,6 +2099,8 @@ DR_API
  * thus is not kept separate from the application. Use of this memory is at the
  * client's own risk.
  *
+ * The resulting memory is guaranteed to be initialized to all zeroes.
+ *
  * Returns the actual address allocated or NULL if memory allocation at
  * preferred base fails.
  */
@@ -2304,8 +2306,9 @@ DR_API
 /**
  * Safely reads \p size bytes from address \p base into buffer \p
  * out_buf.  Reading is done without the possibility of an exception
- * occurring.  Optionally returns the actual number of bytes copied
- * into \p bytes_read.  Returns true if successful.
+ * occurring.  Returns true if the entire \p size bytes were read;
+ * otherwise returns false and if \p bytes_read is non-NULL returns the
+ * partial number of bytes read in \p bytes_read.
  * \note See also DR_TRY_EXCEPT().
  */
 bool
@@ -2315,8 +2318,9 @@ DR_API
 /**
  * Safely writes \p size bytes from buffer \p in_buf to address \p
  * base.  Writing is done without the possibility of an exception
- * occurring.  Optionally returns the actual number of bytes copied
- * into \p bytes_written.  Returns true if successful.
+ * occurring.    Returns true if the entire \p size bytes were written;
+ * otherwise returns false and if \p bytes_written is non-NULL returns the
+ * partial number of bytes written in \p bytes_written.
  * \note See also DR_TRY_EXCEPT().
  */
 bool
@@ -2701,6 +2705,31 @@ DR_API
  */
 bool
 dr_recurlock_mark_as_app(void *reclock);
+
+DR_API
+/** Creates an event object on which threads can wait and be signaled. */
+void *
+dr_event_create(void);
+
+DR_API
+/** Destroys an event object. */
+bool
+dr_event_destroy(void *event);
+
+DR_API
+/** Suspends the current thread until \p event is signaled. */
+bool
+dr_event_wait(void *event);
+
+DR_API
+/** Wakes up at most one thread waiting on \p event. */
+bool
+dr_event_signal(void *event);
+
+DR_API
+/** Resets \p event to no longer be in a signaled state. */
+bool
+dr_event_reset(void *event);
 
 DR_API
 /**
@@ -4264,6 +4293,9 @@ DR_API
  * Raw TLs slots can be read directly using dr_insert_read_raw_tls() and written
  * using dr_insert_write_raw_tls().
  *
+ * Supports passing 0 for \p num_slots, in which case \p tls_register will be
+ * written but no other action taken.
+ *
  * \note These slots are useful for thread-shared code caches.  With
  * thread-private caches, DR's memory pools are guaranteed to be
  * reachable via absolute or rip-relative accesses from the code cache
@@ -5347,7 +5379,7 @@ DR_API
  * multimedia registers incurs a higher performance cost.  An invalid
  * flags value will return false.
  *
- * \note NUM_XMM_SLOTS in the dr_mcontext_t.xmm array are filled in,
+ * \note NUM_SIMD_SLOTS in the dr_mcontext_t.xmm array are filled in,
  * but only if dr_mcontext_xmm_fields_valid() returns true and
  * DR_MC_MULTIMEDIA is set in the flags field.
  *

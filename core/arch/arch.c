@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2017 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -106,6 +106,10 @@ reg_spill_tls_offs(reg_id_t reg)
     case SCRATCH_REG1: return TLS_REG1_SLOT;
     case SCRATCH_REG2: return TLS_REG2_SLOT;
     case SCRATCH_REG3: return TLS_REG3_SLOT;
+#ifdef AARCH64
+    case SCRATCH_REG4: return TLS_REG4_SLOT;
+    case SCRATCH_REG5: return TLS_REG5_SLOT;
+#endif
     }
     /* don't assert if another reg passed: used on random regs looking for spills */
     return -1;
@@ -471,6 +475,8 @@ shared_gencode_emit(generated_code_t *gencode _IF_X86_64(bool x86_mode))
 
     ASSERT(pc < gencode->commit_end_pc);
     gencode->gen_end_pc = pc;
+
+    machine_cache_sync(gencode->gen_start_pc, gencode->gen_end_pc, true);
 }
 
 static void
@@ -874,6 +880,24 @@ arch_exit(IF_WINDOWS_ELSE_NP(bool detach_stacked_callbacks, void))
 #endif
     interp_exit();
     mangle_exit();
+
+    if (doing_detach) {
+        /* Clear for possible re-attach. */
+        shared_code = NULL;
+#if defined(X86) && defined(X64)
+        shared_code_x86 = NULL;
+        shared_code_x86_to_x64 = NULL;
+#endif
+        app_sysenter_instr_addr = NULL;
+#ifdef LINUX
+        /* If we don't clear this we get asserts on vsyscall hook on re-attach on
+         * some Linux variants.  We don't want to clear on Windows 8+ as that causes
+         * asserts on re-attach (i#2145).
+         */
+        syscall_method = SYSCALL_METHOD_UNINITIALIZED;
+        sysenter_hook_failed = false;
+#endif
+    }
 }
 
 static byte *
@@ -3131,7 +3155,9 @@ does_syscall_ret_to_callsite(void)
 void
 set_syscall_method(int method)
 {
-    ASSERT(syscall_method == SYSCALL_METHOD_UNINITIALIZED
+    ASSERT(syscall_method == SYSCALL_METHOD_UNINITIALIZED ||
+           /* on re-attach this happens */
+           syscall_method == method
            IF_UNIX(|| syscall_method == SYSCALL_METHOD_INT/*PR 286922*/));
     syscall_method = method;
 }
@@ -3377,7 +3403,7 @@ dump_mcontext(priv_mcontext_t *context, file_t f, bool dump_xml)
 #ifdef X86
     if (preserve_xmm_caller_saved()) {
         int i, j;
-        for (i=0; i<NUM_XMM_SAVED; i++) {
+        for (i=0; i<NUM_SIMD_SAVED; i++) {
             if (YMM_ENABLED()) {
                 print_file(f, dump_xml ? "\t\tymm%d= \"0x" : "\tymm%d= 0x", i);
                 for (j = 0; j < 8; j++) {

@@ -276,7 +276,7 @@ prepare_for_clean_call(dcontext_t *dcontext, clean_call_info_t *cci,
     /* check if need adjust stack for alignment. */
     if (cci->should_align) {
         uint num_slots = NUM_GP_REGS + NUM_EXTRA_SLOTS;
-        if (cci->skip_save_aflags)
+        if (cci->skip_save_flags)
             num_slots -= 2;
         num_slots -= cci->num_regs_skip; /* regs that not saved */
         if ((num_slots % 2) == 1) {
@@ -290,8 +290,8 @@ prepare_for_clean_call(dcontext_t *dcontext, clean_call_info_t *cci,
         }
     }
 #endif
-    ASSERT(cci->skip_save_aflags   ||
-           cci->num_xmms_skip != 0 ||
+    ASSERT(cci->skip_save_flags    ||
+           cci->num_simd_skip != 0 ||
            cci->num_regs_skip != 0 ||
            dstack_offs == sizeof(priv_mcontext_t) + clean_call_beyond_mcontext());
     return dstack_offs;
@@ -309,7 +309,7 @@ cleanup_after_clean_call(dcontext_t *dcontext, clean_call_info_t *cci,
     /* PR 218790: remove the padding we added for 16-byte rsp alignment */
     if (cci->should_align) {
         uint num_slots = NUM_GP_REGS + NUM_EXTRA_SLOTS;
-        if (cci->skip_save_aflags)
+        if (cci->skip_save_flags)
             num_slots += 2;
         num_slots -= cci->num_regs_skip; /* regs that not saved */
         if ((num_slots % 2) == 1) {
@@ -464,15 +464,8 @@ insert_meta_call_vargs(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
         /* XXX PR 245936: let user decide whether to clean up?
          * i.e., support calling a stdcall routine?
          */
-#ifdef X86
-        PRE(ilist, instr,
-            INSTR_CREATE_lea(dcontext, opnd_create_reg(REG_XSP),
-                             opnd_create_base_disp(REG_XSP, REG_NULL, 0,
-                                                   stack_for_params, OPSZ_lea)));
-#elif defined(ARM)
-        /* FIXME i#1551: NYI on ARM */
-        ASSERT_NOT_IMPLEMENTED(false);
-#endif
+        PRE(ilist, instr, XINST_CREATE_add(dcontext, opnd_create_reg(REG_XSP),
+                                           OPND_CREATE_INT32(stack_for_params)));
     }
 
 #ifdef CLIENT_INTERFACE
@@ -787,13 +780,13 @@ mangle_syscall_code(dcontext_t *dcontext, fragment_t *f, byte *pc, bool skip)
     /* FIXME : this should work out to just a 1 byte write, but let's make
      * it more clear that this is atomic! */
     if (opnd_get_pc(instr_get_target(&instr)) != target) {
-        DEBUG_DECLARE(byte *nxt_pc;)
+        byte *nxt_pc;
         LOG(THREAD, LOG_SYSCALLS, 3,
             "\tmodifying target of syscall jmp to "PFX"\n", target);
         instr_set_target(&instr, opnd_create_pc(target));
-        DEBUG_DECLARE(nxt_pc = )
-            instr_encode(dcontext, &instr, skip_pc);
+        nxt_pc = instr_encode(dcontext, &instr, skip_pc);
         ASSERT(nxt_pc != NULL && nxt_pc == cti_pc);
+        machine_cache_sync(skip_pc, nxt_pc, true);
     } else {
         LOG(THREAD, LOG_SYSCALLS, 3,
             "\ttarget of syscall jmp is already "PFX"\n", target);
@@ -894,6 +887,14 @@ mangle(dcontext_t *dcontext, instrlist_t *ilist, uint *flags INOUT,
 #ifdef X86
         if (instr_saves_float_pc(instr) && instr_is_app(instr)) {
             mangle_float_pc(dcontext, ilist, instr, next_instr, flags);
+        }
+#endif
+
+#ifdef AARCH64
+        if (instr_is_icache_op(instr) && instr_is_app(instr)) {
+            next_instr = mangle_icache_op(dcontext, ilist, instr, next_instr,
+                                          get_app_instr_xl8(next_instr));
+            continue;
         }
 #endif
 
@@ -1219,6 +1220,7 @@ clean_call_info_init(clean_call_info_t *cci, void *callee,
 void
 mangle_init(void)
 {
+    mangle_arch_init();
     /* create a default func_info for:
      * 1. clean call callee that cannot be analyzed.
      * 2. variable clean_callees will not be updated during the execution

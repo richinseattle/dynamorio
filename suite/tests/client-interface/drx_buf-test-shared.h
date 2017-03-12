@@ -44,8 +44,8 @@
 #endif
 
 #ifdef ARM
-# define TEST_REG DR_REG_R4
-# define TEST_REG_ASM r4
+# define TEST_REG DR_REG_R12
+# define TEST_REG_ASM r12
 #endif
 
 #ifdef AARCH64
@@ -76,5 +76,8 @@
 
 #define DRX_BUF_TEST_5_ASM MAKE_HEX_ASM(DRX_BUF_TEST_CONST(5))
 #define DRX_BUF_TEST_5_C   MAKE_HEX_C(DRX_BUF_TEST_CONST(5))
+
+#define DRX_BUF_TEST_6_ASM MAKE_HEX_ASM(DRX_BUF_TEST_CONST(6))
+#define DRX_BUF_TEST_6_C   MAKE_HEX_C(DRX_BUF_TEST_CONST(6))
 
 #define NUM_ITER 100

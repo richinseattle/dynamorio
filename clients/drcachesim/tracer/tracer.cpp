@@ -1,5 +1,5 @@
 /* ******************************************************************************
- * Copyright (c) 2011-2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2017 Google, Inc.  All rights reserved.
  * Copyright (c) 2010 Massachusetts Institute of Technology  All rights reserved.
  * ******************************************************************************/
 
@@ -43,6 +43,7 @@
 #include <string>
 #include "dr_api.h"
 #include "drmgr.h"
+#include "drmemtrace.h"
 #include "drreg.h"
 #include "drutil.h"
 #include "drx.h"
@@ -53,9 +54,17 @@
 #include "../common/trace_entry.h"
 #include "../common/named_pipe.h"
 #include "../common/options.h"
+#include "../common/utils.h"
 
 #ifdef ARM
 # include "../../../core/unix/include/syscall_linux_arm.h" // for SYS_cacheflush
+#endif
+
+/* Make sure we export function name as the symbol name without mangling. */
+#ifdef __cplusplus
+extern "C" {
+DR_EXPORT void drmemtrace_client_main(client_id_t id, int argc, const char *argv[]);
+}
 #endif
 
 #define NOTIFY(level, ...) do {            \
@@ -86,7 +95,12 @@ typedef struct {
     byte *buf_base;
     uint64 num_refs;
     uint64 bytes_written;
-    file_t file; /* For offline traces */
+    /* For offline traces */
+    file_t file;
+    size_t init_header_size;
+    /* For file_ops_func.handoff_buf */
+    uint num_buffers;
+    byte *reserve_buf;
 } per_thread_t;
 
 #define MAX_NUM_DELAY_INSTRS 32
@@ -114,6 +128,79 @@ static uint64 num_refs; /* keep a global memory reference count */
 static bool have_phys;
 static physaddr_t physaddr;
 
+/* file operations functions */
+struct file_ops_func_t {
+    drmemtrace_open_file_func_t  open_file;
+    drmemtrace_read_file_func_t  read_file;
+    drmemtrace_write_file_func_t write_file;
+    drmemtrace_close_file_func_t close_file;
+    drmemtrace_create_dir_func_t create_dir;
+    drmemtrace_handoff_func_t handoff_buf;
+    drmemtrace_exit_func_t exit_cb;
+    void *exit_arg;
+};
+static struct file_ops_func_t file_ops_func = {
+    dr_open_file, dr_read_file, dr_write_file, dr_close_file, dr_create_dir,
+};
+
+drmemtrace_status_t
+drmemtrace_replace_file_ops(drmemtrace_open_file_func_t  open_file_func,
+                            drmemtrace_read_file_func_t  read_file_func,
+                            drmemtrace_write_file_func_t write_file_func,
+                            drmemtrace_close_file_func_t close_file_func,
+                            drmemtrace_create_dir_func_t create_dir_func)
+{
+    /* We don't check op_offline b/c option parsing may not have happened yet. */
+    if (open_file_func != NULL)
+        file_ops_func.open_file = open_file_func;
+    if (read_file_func != NULL)
+        file_ops_func.read_file = read_file_func;
+    if (write_file_func != NULL)
+        file_ops_func.write_file = write_file_func;
+    if (close_file_func != NULL)
+        file_ops_func.close_file = close_file_func;
+    if (create_dir_func != NULL)
+        file_ops_func.create_dir = create_dir_func;
+    return DRMEMTRACE_SUCCESS;
+}
+
+drmemtrace_status_t
+drmemtrace_buffer_handoff(drmemtrace_handoff_func_t handoff_func,
+                          drmemtrace_exit_func_t exit_func,
+                          void *exit_func_arg)
+{
+    /* We don't check op_offline b/c option parsing may not have happened yet. */
+    file_ops_func.handoff_buf = handoff_func;
+    file_ops_func.exit_cb = exit_func;
+    file_ops_func.exit_arg = exit_func_arg;
+    return DRMEMTRACE_SUCCESS;
+}
+
+static char modlist_path[MAXIMUM_PATH];
+
+drmemtrace_status_t
+drmemtrace_get_modlist_path(OUT const char **path)
+{
+    if (path == NULL)
+        return DRMEMTRACE_ERROR_INVALID_PARAMETER;
+    *path = modlist_path;
+    return DRMEMTRACE_SUCCESS;
+}
+
+drmemtrace_status_t
+drmemtrace_custom_module_data(void * (*load_cb)(module_data_t *module),
+                              int (*print_cb)(void *data, char *dst, size_t max_len),
+                              void (*free_cb)(void *data))
+{
+    /* We want to support this being called prior to initializing us, so we use
+     * a static routine and do not check -offline.
+     */
+    if (offline_instru_t::custom_module_data(load_cb, print_cb, free_cb))
+        return DRMEMTRACE_SUCCESS;
+    else
+        return DRMEMTRACE_ERROR;
+}
+
 /* Allocated TLS slot offsets */
 enum {
     MEMTRACE_TLS_OFFS_BUF_PTR,
@@ -127,6 +214,42 @@ static int      tls_idx;
 /* We leave a slot at the start so we can easily insert a header entry */
 #define BUF_HDR_SLOTS 1
 static size_t buf_hdr_slots_size;
+
+static void
+create_buffer(per_thread_t *data)
+{
+    data->buf_base = (byte *)
+        dr_raw_mem_alloc(max_buf_size, DR_MEMPROT_READ | DR_MEMPROT_WRITE, NULL);
+    /* For file_ops_func.handoff_buf we have to handle failure as OOM is not unlikely. */
+    if (data->buf_base == NULL) {
+        /* Switch to "reserve" buffer. */
+        if (data->reserve_buf == NULL) {
+            NOTIFY(0, "Fatal error: out of memory and cannot recover.\n");
+            dr_abort();
+        }
+        NOTIFY(0, "Out of memory: truncating further tracing.\n");
+        data->buf_base = data->reserve_buf;
+        /* Avoid future buffer output. */
+        op_max_trace_size.set_value(data->bytes_written - 1);
+        return;
+    }
+    /* dr_raw_mem_alloc guarantees to give us zeroed memory, so no need for a memset */
+    /* set sentinel (non-zero) value in redzone */
+    memset(data->buf_base + trace_buf_size, -1, redzone_size);
+    data->num_buffers++;
+    if (data->num_buffers == 2) {
+        /* Create a "reserve" buffer so we can continue after hitting OOM later.
+         * It is much simpler to keep running the same instru that writes to a
+         * buffer and just never write it out, similarly to how we handle
+         * -max_trace_size.  This costs us some memory (not for idle threads: that's
+         * why we wait for the 2nd buffer) but we gain simplicity.
+         */
+        data->reserve_buf = (byte *)
+            dr_raw_mem_alloc(max_buf_size, DR_MEMPROT_READ | DR_MEMPROT_WRITE, NULL);
+        if (data->reserve_buf != NULL)
+            memset(data->reserve_buf + trace_buf_size, -1, redzone_size);
+    }
+}
 
 static inline byte *
 atomic_pipe_write(void *drcontext, byte *pipe_start, byte *pipe_end)
@@ -149,8 +272,14 @@ write_trace_data(void *drcontext, byte *towrite_start, byte *towrite_end)
     if (op_offline.get_value()) {
         per_thread_t *data = (per_thread_t *) drmgr_get_tls_field(drcontext, tls_idx);
         ssize_t size = towrite_end - towrite_start;
-        if (dr_write_file(data->file, towrite_start, size) < size) {
-            NOTIFY(0, "Fatal error: failed to write trace");
+        if (file_ops_func.handoff_buf != NULL) {
+            if (!file_ops_func.handoff_buf(data->file, towrite_start, size,
+                                           max_buf_size)) {
+                NOTIFY(0, "Fatal error: failed to hand off trace\n");
+                dr_abort();
+            }
+        } else if (file_ops_func.write_file(data->file, towrite_start, size) < size) {
+            NOTIFY(0, "Fatal error: failed to write trace\n");
             dr_abort();
         }
         return towrite_start;
@@ -159,19 +288,26 @@ write_trace_data(void *drcontext, byte *towrite_start, byte *towrite_end)
 }
 
 static void
-memtrace(void *drcontext)
+memtrace(void *drcontext, bool skip_size_cap)
 {
     per_thread_t *data = (per_thread_t *) drmgr_get_tls_field(drcontext, tls_idx);
     byte *mem_ref, *buf_ptr;
     byte *pipe_start, *pipe_end, *redzone;
     bool do_write = true;
+    size_t header_size = buf_hdr_slots_size;
 
     buf_ptr = BUF_PTR(data->seg_base);
-    /* The initial slot is left empty for the header entry, which we add here */
-    instru->append_header(data->buf_base, dr_get_thread_id(drcontext));
+    /* The initial slot is left empty for the header entry, which we add here,
+     * unless this is the very first buffer for this thread, in which case it
+     * already has a header.
+     */
+    if (data->num_refs == 0 && op_offline.get_value())
+        header_size = data->init_header_size;
+    else
+        instru->append_unit_header(data->buf_base, dr_get_thread_id(drcontext));
     pipe_start = data->buf_base;
     pipe_end = pipe_start;
-    if (op_max_trace_size.get_value() > 0 &&
+    if (!skip_size_cap && op_max_trace_size.get_value() > 0 &&
         data->bytes_written > op_max_trace_size.get_value()) {
         /* We don't guarantee to match the limit exactly so we allow one buffer
          * beyond.  We also don't put much effort into reducing overhead once
@@ -182,7 +318,7 @@ memtrace(void *drcontext)
         data->bytes_written += buf_ptr - pipe_start;
 
     if (do_write) {
-        for (mem_ref = data->buf_base + buf_hdr_slots_size; mem_ref < buf_ptr;
+        for (mem_ref = data->buf_base + header_size; mem_ref < buf_ptr;
              mem_ref += instru->sizeof_entry()) {
             data->num_refs++;
             if (have_phys && op_use_physical.get_value()) {
@@ -231,14 +367,19 @@ memtrace(void *drcontext)
         }
     }
 
-    // Our instrumentation reads from buffer and skips the clean call if the
-    // content is 0, so we need set zero in the trace buffer and set non-zero
-    // in redzone.
-    memset(data->buf_base, 0, trace_buf_size);
-    redzone = data->buf_base + trace_buf_size;
-    if (buf_ptr > redzone) {
-        // Set sentinel (non-zero) value in redzone
-        memset(redzone, -1, buf_ptr - redzone);
+    if (do_write && file_ops_func.handoff_buf != NULL) {
+        // The owner of the handoff callback now owns the buffer, and we get a new one.
+        create_buffer(data);
+    } else {
+        // Our instrumentation reads from buffer and skips the clean call if the
+        // content is 0, so we need set zero in the trace buffer and set non-zero
+        // in redzone.
+        memset(data->buf_base, 0, trace_buf_size);
+        redzone = data->buf_base + trace_buf_size;
+        if (buf_ptr > redzone) {
+            // Set sentinel (non-zero) value in redzone
+            memset(redzone, -1, buf_ptr - redzone);
+        }
     }
     BUF_PTR(data->seg_base) = data->buf_base + buf_hdr_slots_size;
 }
@@ -248,7 +389,7 @@ static void
 clean_call(void)
 {
     void *drcontext = dr_get_current_drcontext();
-    memtrace(drcontext);
+    memtrace(drcontext, false);
 }
 
 static void
@@ -331,6 +472,7 @@ instrument_clean_call(void *drcontext, instrlist_t *ilist, instr_t *where,
                       reg_id_t reg_ptr, reg_id_t reg_tmp)
 {
     instr_t *skip_call = INSTR_CREATE_label(drcontext);
+    IF_X86(uint64 prof_pcs;)
     MINSERT(ilist, where,
             XINST_CREATE_load(drcontext,
                               opnd_create_reg(reg_ptr),
@@ -342,8 +484,25 @@ instrument_clean_call(void *drcontext, instrlist_t *ilist, instr_t *where,
      * Long-term we should try a fault instead (xref drx_buf) or a lean
      * proc to clean call gencode.
      */
-    MINSERT(ilist, where,
-            INSTR_CREATE_jecxz(drcontext, opnd_create_instr(skip_call)));
+    /* i#2147: -prof_pcs adds extra cleancall code that makes jecxz not reach.
+     * XXX: it would be nice to have a more robust solution than this explicit check
+     * for that DR option!
+     */
+    if (dr_get_integer_option("profile_pcs", &prof_pcs) && prof_pcs) {
+        instr_t *should_skip = INSTR_CREATE_label(drcontext);
+        instr_t *no_skip = INSTR_CREATE_label(drcontext);
+        MINSERT(ilist, where,
+                INSTR_CREATE_jecxz(drcontext, opnd_create_instr(should_skip)));
+        MINSERT(ilist, where,
+                INSTR_CREATE_jmp(drcontext, opnd_create_instr(no_skip)));
+        MINSERT(ilist, where, should_skip);
+        MINSERT(ilist, where,
+                INSTR_CREATE_jmp(drcontext, opnd_create_instr(skip_call)));
+        MINSERT(ilist, where, no_skip);
+    } else {
+        MINSERT(ilist, where,
+                INSTR_CREATE_jecxz(drcontext, opnd_create_instr(skip_call)));
+    }
 #elif defined(ARM)
     if (dr_get_isa_mode(drcontext) == DR_ISA_ARM_THUMB) {
         instr_t *noskip = INSTR_CREATE_label(drcontext);
@@ -465,7 +624,7 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb,
     if (drreg_reserve_register(drcontext, bb, instr, &rvec, &reg_ptr) != DRREG_SUCCESS ||
         drreg_reserve_register(drcontext, bb, instr, NULL, &reg_tmp) != DRREG_SUCCESS) {
         // We can't recover.
-        NOTIFY(0, "Fatal error: failed to reserve scratch registers");
+        NOTIFY(0, "Fatal error: failed to reserve scratch registers\n");
         dr_abort();
     }
     drvector_delete(&rvec);
@@ -603,7 +762,8 @@ event_pre_syscall(void *drcontext, int sysnum)
         }
     }
 #endif
-    memtrace(drcontext);
+    if (file_ops_func.handoff_buf == NULL)
+        memtrace(drcontext, false);
     return true;
 }
 
@@ -615,53 +775,66 @@ event_thread_init(void *drcontext)
     per_thread_t *data = (per_thread_t *)
         dr_thread_alloc(drcontext, sizeof(per_thread_t));
     DR_ASSERT(data != NULL);
+    memset(data, 0, sizeof(*data));
     drmgr_set_tls_field(drcontext, tls_idx, data);
 
     /* Keep seg_base in a per-thread data structure so we can get the TLS
      * slot and find where the pointer points to in the buffer.
      */
     data->seg_base = (byte *) dr_get_dr_segment_base(tls_seg);
-    data->buf_base = (byte *)
-        dr_raw_mem_alloc(max_buf_size, DR_MEMPROT_READ | DR_MEMPROT_WRITE, NULL);
-    DR_ASSERT(data->seg_base != NULL && data->buf_base != NULL);
-    /* clear trace buffer */
-    memset(data->buf_base, 0, trace_buf_size);
-    /* set sentinel (non-zero) value in redzone */
-    memset(data->buf_base + trace_buf_size, -1, redzone_size);
-    /* put buf_base to TLS plus header slots as starting buf_ptr */
-    BUF_PTR(data->seg_base) = data->buf_base + buf_hdr_slots_size;
-    data->num_refs = 0;
-    data->bytes_written = 0;
+    DR_ASSERT(data->seg_base != NULL);
+    create_buffer(data);
 
     if (op_offline.get_value()) {
         /* We do not need to call drx_init before using drx_open_unique_appid_file.
          * Since we're now in a subdir we could make the name simpler but this
          * seems nice and complete.
          */
-        data->file = drx_open_unique_appid_file(logsubdir,
-                                                dr_get_thread_id(drcontext),
-                                                OUTFILE_PREFIX, OUTFILE_SUFFIX,
-#ifndef WINDOWS
-                                                DR_FILE_CLOSE_ON_FORK |
-#endif
-                                                DR_FILE_ALLOW_LARGE,
-                                                buf, BUFFER_SIZE_ELEMENTS(buf));
-        NULL_TERMINATE_BUFFER(buf);
-        if (data->file == INVALID_FILE) {
-            NOTIFY(0, "Fatal error: failed to create trace file %s", buf);
+        int i;
+        const int NUM_OF_TRIES = 10000;
+        uint flags = IF_UNIX(DR_FILE_CLOSE_ON_FORK |)
+            DR_FILE_ALLOW_LARGE | DR_FILE_WRITE_REQUIRE_NEW;
+        /* We use drx_open_unique_appid_file with DRX_FILE_SKIP_OPEN to get a
+         * file name for creation.  Retry if the same name file already exists.
+         * Abort if we fail too many times.
+         */
+        for (i = 0; i < NUM_OF_TRIES; i++) {
+            drx_open_unique_appid_file(logsubdir,
+                                       dr_get_thread_id(drcontext),
+                                       OUTFILE_PREFIX, OUTFILE_SUFFIX,
+                                       DRX_FILE_SKIP_OPEN,
+                                       buf, BUFFER_SIZE_ELEMENTS(buf));
+            NULL_TERMINATE_BUFFER(buf);
+            data->file = file_ops_func.open_file(buf, flags);
+            if (data->file != INVALID_FILE)
+                break;
+        }
+        if (i == NUM_OF_TRIES) {
+            NOTIFY(0, "Fatal error: failed to create trace file %s\n", buf);
             dr_abort();
         }
-        NOTIFY(1, "Created trace file %s\n", buf);
-    }
+        NOTIFY(2, "Created thread trace file %s\n", buf);
 
-    /* pass pid and tid to the simulator to register current thread */
-    proc_info = (byte *)buf;
-    DR_ASSERT(BUFFER_SIZE_BYTES(buf) >= 3*instru->sizeof_entry());
-    /* The trace must start with a timestamp */
-    proc_info += instru->append_header(proc_info, dr_get_thread_id(drcontext));
-    proc_info += instru->append_tid(proc_info, dr_get_thread_id(drcontext));
-    proc_info += instru->append_pid(proc_info, dr_get_process_id());
-    write_trace_data(drcontext, (byte *)buf, proc_info);
+        /* Write initial headers at the top of the first buffer. */
+        data->init_header_size =
+            instru->append_thread_header(data->buf_base, dr_get_thread_id(drcontext));
+        BUF_PTR(data->seg_base) = data->buf_base + data->init_header_size;
+        BUF_PTR(data->seg_base) +=
+            instru->append_tid(BUF_PTR(data->seg_base), dr_get_thread_id(drcontext));
+        BUF_PTR(data->seg_base) +=
+            instru->append_pid(BUF_PTR(data->seg_base), dr_get_process_id());
+    } else {
+        /* pass pid and tid to the simulator to register current thread */
+        proc_info = (byte *)buf;
+        DR_ASSERT(BUFFER_SIZE_BYTES(buf) >= 3*instru->sizeof_entry());
+        proc_info += instru->append_thread_header(proc_info, dr_get_thread_id(drcontext));
+        proc_info += instru->append_tid(proc_info, dr_get_thread_id(drcontext));
+        proc_info += instru->append_pid(proc_info, dr_get_process_id());
+        write_trace_data(drcontext, (byte *)buf, proc_info);
+
+        /* put buf_base to TLS plus header slots as starting buf_ptr */
+        BUF_PTR(data->seg_base) = data->buf_base + buf_hdr_slots_size;
+    }
 
     // XXX i#1729: gather and store an initial callstack for the thread.
 }
@@ -670,20 +843,26 @@ static void
 event_thread_exit(void *drcontext)
 {
     per_thread_t *data = (per_thread_t *) drmgr_get_tls_field(drcontext, tls_idx);
-
     /* let the simulator know this thread has exited */
+    if (op_max_trace_size.get_value() > 0 &&
+        data->bytes_written > op_max_trace_size.get_value()) {
+        // If over the limit, we still want to write the footer, but nothing else.
+        BUF_PTR(data->seg_base) = data->buf_base + buf_hdr_slots_size;
+    }
     BUF_PTR(data->seg_base) +=
         instru->append_thread_exit(BUF_PTR(data->seg_base), dr_get_thread_id(drcontext));
 
-    memtrace(drcontext);
+    memtrace(drcontext, true);
 
     if (op_offline.get_value())
-        dr_close_file(data->file);
+        file_ops_func.close_file(data->file);
 
     dr_mutex_lock(mutex);
     num_refs += data->num_refs;
     dr_mutex_unlock(mutex);
     dr_raw_mem_free(data->buf_base, max_buf_size);
+    if (data->reserve_buf != NULL)
+        dr_raw_mem_free(data->reserve_buf, max_buf_size);
     dr_thread_free(drcontext, data, sizeof(per_thread_t));
 }
 
@@ -691,14 +870,20 @@ static void
 event_exit(void)
 {
     dr_log(NULL, LOG_ALL, 1, "drcachesim num refs seen: " SZFMT"\n", num_refs);
+    NOTIFY(1, "drmemtrace exiting process " PIDFMT"; traced " SZFMT" references.\n",
+           dr_get_process_id(), num_refs);
     /* we use placement new for better isolation */
     instru->~instru_t();
     dr_global_free(instru, MAX_INSTRU_SIZE);
 
     if (op_offline.get_value())
-        dr_close_file(module_file);
+        file_ops_func.close_file(module_file);
     else
         ipc_pipe.close();
+
+    if (file_ops_func.exit_cb != NULL)
+        (*file_ops_func.exit_cb)(file_ops_func.exit_arg);
+
     if (!dr_raw_tls_cfree(tls_offs, MEMTRACE_TLS_COUNT))
         DR_ASSERT(false);
 
@@ -712,6 +897,7 @@ event_exit(void)
                                                       event_bb_instru2instru) ||
         drreg_exit() != DRREG_SUCCESS)
         DR_ASSERT(false);
+    dr_unregister_exit_event(event_exit);
 
     dr_mutex_destroy(mutex);
     drutil_exit();
@@ -722,11 +908,26 @@ static bool
 init_offline_dir(void)
 {
     char buf[MAXIMUM_PATH];
-    /* We do not need to call drx_init before using drx_open_unique_appid_dir. */
-    if (!drx_open_unique_appid_dir(op_outdir.get_value().c_str(),
+    int i;
+    const int NUM_OF_TRIES = 10000;
+    /* open unique dir */
+    /* We do not need to call drx_init before using drx_open_unique_appid_file. */
+    for (i = 0; i < NUM_OF_TRIES; i++) {
+        /* We use drx_open_unique_appid_file with DRX_FILE_SKIP_OPEN to get a
+         * directory name for creation.  Retry if the same name directory already
+         * exists.  Abort if we fail too many times.
+         */
+        drx_open_unique_appid_file(op_outdir.get_value().c_str(),
                                    dr_get_process_id(),
                                    OUTFILE_PREFIX, "dir",
-                                   buf, BUFFER_SIZE_ELEMENTS(buf)))
+                                   DRX_FILE_SKIP_OPEN,
+                                   buf, BUFFER_SIZE_ELEMENTS(buf));
+        NULL_TERMINATE_BUFFER(buf);
+        /* open the dir */
+        if (file_ops_func.create_dir(buf))
+            break;
+    }
+    if (i == NUM_OF_TRIES)
         return false;
     /* We group the raw thread files in a further subdir to isolate from the
      * processed trace file.
@@ -734,18 +935,28 @@ init_offline_dir(void)
     dr_snprintf(logsubdir, BUFFER_SIZE_ELEMENTS(logsubdir), "%s%s%s", buf, DIRSEP,
                 OUTFILE_SUBDIR);
     NULL_TERMINATE_BUFFER(logsubdir);
-    if (!dr_create_dir(logsubdir))
+    if (!file_ops_func.create_dir(logsubdir))
         return false;
-    dr_snprintf(buf, BUFFER_SIZE_ELEMENTS(buf), "%s%s%s", logsubdir, DIRSEP,
-                MODULE_LIST_FILENAME);
-    NULL_TERMINATE_BUFFER(buf);
-    module_file = dr_open_file(buf, DR_FILE_WRITE_REQUIRE_NEW
-                               IF_WINDOWS(| DR_FILE_CLOSE_ON_FORK));
+    /* If the ops are replaced, it's up the replacer to notify the user.
+     * In some cases data is sent over the network and the replaced create_dir is
+     * a nop that returns true, in which case we don't want this message.
+     */
+    if (file_ops_func.create_dir == dr_create_dir)
+        NOTIFY(1, "Log directory is %s\n", logsubdir);
+    dr_snprintf(modlist_path, BUFFER_SIZE_ELEMENTS(modlist_path),
+                "%s%s%s", logsubdir, DIRSEP, DRMEMTRACE_MODULE_LIST_FILENAME);
+    NULL_TERMINATE_BUFFER(modlist_path);
+    module_file = file_ops_func.open_file(modlist_path, DR_FILE_WRITE_REQUIRE_NEW
+                                          IF_UNIX(| DR_FILE_CLOSE_ON_FORK));
     return (module_file != INVALID_FILE);
 }
 
+/* We export drmemtrace_client_main so that a global dr_client_main can initialize
+ * drmemtrace client by calling drmemtrace_client_main in a statically linked
+ * multi-client executable.
+ */
 DR_EXPORT void
-dr_client_main(client_id_t id, int argc, const char *argv[])
+drmemtrace_client_main(client_id_t id, int argc, const char *argv[])
 {
     /* We need 2 reg slots beyond drreg's eflags slots => 3 slots */
     drreg_options_t ops = {sizeof(ops), 3, false};
@@ -773,13 +984,15 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     if (op_offline.get_value()) {
         void *buf;
         if (!init_offline_dir()) {
-            NOTIFY(0, "Failed to create a subdir in %s", op_outdir.get_value().c_str());
+            NOTIFY(0, "Failed to create a subdir in %s\n", op_outdir.get_value().c_str());
             dr_abort();
         }
         /* we use placement new for better isolation */
         DR_ASSERT(MAX_INSTRU_SIZE >= sizeof(offline_instru_t));
         buf = dr_global_alloc(MAX_INSTRU_SIZE);
-        instru = new(buf) offline_instru_t(insert_load_buf_ptr, module_file);
+        instru = new(buf) offline_instru_t(insert_load_buf_ptr,
+                                           file_ops_func.write_file,
+                                           module_file);
     } else {
         void *buf;
         /* we use placement new for better isolation */
@@ -851,4 +1064,17 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
         if (!have_phys)
             NOTIFY(0, "Unable to open pagemap: using virtual addresses.\n");
     }
+}
+
+/* To support statically linked multiple clients, we add drmemtrace_client_main
+ * as the real client init function and make dr_client_main a weak symbol.
+ * We could also use alias to link dr_client_main to drmemtrace_client_main.
+ * A simple call won't add too much overhead, and works both in Windows and Linux.
+ * To automate the process and minimize the code change, we should investigate the
+ * approach that uses command-line link option to alias two symbols.
+ */
+DR_EXPORT WEAK void
+dr_client_main(client_id_t id, int argc, const char *argv[])
+{
+    drmemtrace_client_main(id, argc, argv);
 }

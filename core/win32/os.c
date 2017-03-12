@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2017 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -1226,6 +1226,8 @@ os_slow_exit(void)
     aslr_exit();
     eventlog_slow_exit();
     os_take_over_exit();
+
+    tls_dcontext_offs = TLS_UNINITIALIZED;
 }
 
 
@@ -1556,6 +1558,8 @@ bool
 os_tls_calloc(OUT uint *offset, uint num_slots, uint alignment)
 {
     bool need_synch = !dynamo_initialized;
+    if (num_slots == 0)
+        return false;
     return (bool) tls_calloc(need_synch, offset, num_slots, alignment);
 }
 
@@ -2478,6 +2482,13 @@ void
 os_thread_take_over_secondary(dcontext_t *dcontext)
 {
     /* Nothing yet. */
+}
+
+bool
+os_thread_re_take_over(void)
+{
+    /* Nothing to do. */
+    return false;
 }
 
 bool
@@ -5678,6 +5689,13 @@ safe_write_ex(void *base, size_t size, const void *in_buf, size_t *bytes_written
     if (bytes_written != NULL)
         *bytes_written = 0;
     STATS_INC(num_safe_writes);
+    /* i#2224: on win10, NtWriteVirtualMemory no longer returns the number of
+     * bytes written and instead returns -1!  Thus if the caller cares we fall
+     * back to a try-except version.  This also means that callers who want to
+     * fail on partial writes should pass in NULL for bytes_written!
+     */
+    if (get_os_version() >= WINDOWS_VERSION_10 && bytes_written != NULL)
+        return safe_write_try_except(base, size, in_buf, bytes_written);
     return nt_write_virtual_memory(NT_CURRENT_PROCESS, base, in_buf,
                                    size, bytes_written);
 }
@@ -5686,8 +5704,7 @@ safe_write_ex(void *base, size_t size, const void *in_buf, size_t *bytes_written
 bool
 safe_write(void *base, size_t size, const void *in_buf)
 {
-    size_t written_bytes = 0;
-    return (safe_write_ex(base, size, in_buf, &written_bytes) && written_bytes == size);
+    return safe_write_ex(base, size, in_buf, NULL);
 }
 
 /* unlike get_memory_info() we return osprot preserving complete
@@ -5748,6 +5765,24 @@ mark_page_as_guard(byte *pc)
     ASSERT(ALIGNED(pc, PAGE_SIZE));
     res = protect_virtual_memory((void *) pc, PAGE_SIZE, flags, &old_prot);
     ASSERT(res);
+}
+
+/* Removes guard protection from page containing pc */
+bool
+unmark_page_as_guard(byte *pc, uint prot)
+{
+    uint old_prot;
+    int res;
+    byte *start_page = (byte *)ALIGN_BACKWARD(pc, PAGE_SIZE);
+
+    uint flags = memprot_to_osprot(prot & ~MEMPROT_GUARD);
+    res = protect_virtual_memory(start_page, PAGE_SIZE, flags, &old_prot);
+    ASSERT(res);
+    /* It is possible that another thread accessed the guarded page
+     * while we wanted to remove this protection. The returned value
+     * can be checked for such a case.
+     */
+    return TEST(PAGE_GUARD, old_prot);
 }
 
 /* Change page protection for pc:pc+size.
@@ -8465,17 +8500,21 @@ early_inject_init()
         case WINDOWS_VERSION_8:
         case WINDOWS_VERSION_8_1:
         case WINDOWS_VERSION_10:
+        case WINDOWS_VERSION_10_1511:
+        case WINDOWS_VERSION_10_1607:
             /* LdrLoadDll is best but LdrpLoadDll seems to work just as well
-             * (FIXME would it be better just to use that so matches XP?),
+             * (XXX: would it be better just to use that so matches XP?),
              * LdrpLoadImportModule also works but it misses the load of
-             * kernel32. */
+             * kernel32.
+             */
             early_inject_location = INJECT_LOCATION_LdrLoadDll;
             break;
         default:
             /* is prob. a newer windows version so the 2003 location is the
-             * most likely to work */
+             * most likely to work
+             */
             early_inject_location = INJECT_LOCATION_LdrLoadDll;
-            ASSERT_NOT_REACHED();
+            ASSERT(os_version > WINDOWS_VERSION_10);
         }
     }
     ASSERT(early_inject_location != INJECT_LOCATION_LdrDefault);

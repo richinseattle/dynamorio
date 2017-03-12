@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2017 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -516,6 +516,8 @@ dynamorio_app_init(void)
          * N.B.: we never de-allocate initstack (see comments in app_exit)
          */
         initstack = (byte *) stack_alloc(DYNAMORIO_STACK_SIZE, NULL);
+        LOG(GLOBAL, LOG_SYNCH, 2, "initstack is "PFX"-"PFX"\n",
+            initstack - DYNAMORIO_STACK_SIZE, initstack);
 
 #if defined(WINDOWS) && defined(STACK_GUARD_PAGE)
         /* PR203701: separate stack for error reporting when the
@@ -1474,6 +1476,33 @@ dynamo_process_exit(void)
 #endif /* !DEBUG */
 }
 
+void
+dynamo_exit_post_detach(void)
+{
+    /* i#2157: best-effort re-init in case of re-attach */
+
+    do_once_generation++; /* Increment the generation in case we re-attach */
+
+    dynamo_initialized = false;
+    dynamo_heap_initialized = false;
+    automatic_startup = false;
+    control_all_threads = false;
+    dr_api_entry = false;
+    dr_api_exit  = false;
+#ifdef UNIX
+    dynamo_exiting = false;
+#endif
+    dynamo_exited = false;
+    dynamo_exited_and_cleaned = false;
+#ifdef DEBUG
+    dynamo_exited_log_and_stats = false;
+#endif
+    dynamo_resetting = false;
+#ifdef UNIX
+    post_execve = false;
+#endif
+}
+
 dcontext_t *
 create_new_dynamo_context(bool initial, byte *dstack_in, priv_mcontext_t *mc)
 {
@@ -1618,6 +1647,9 @@ initialize_dynamo_context(dcontext_t *dcontext)
 #ifdef WINDOWS
 #ifdef CLIENT_INTERFACE
     dcontext->app_errno = 0;
+# ifdef DEBUG
+    dcontext->is_client_thread_exiting = false;
+# endif
 #endif
     dcontext->sys_param_base = NULL;
     /* always initialize aslr_context */
@@ -2065,6 +2097,9 @@ remove_thread(IF_WINDOWS_(HANDLE hthread) thread_id_t tid)
 /* this bool is protected by reset_pending_lock */
 DECLARE_FREQPROT_VAR(static bool reset_at_nth_thread_triggered, false);
 
+#ifdef DEBUG
+bool dynamo_thread_init_during_process_exit = false;
+#endif
 /* thread-specific initialization
  * if dstack_in is NULL, then a dstack is allocated; else dstack_in is used
  * as the thread's dstack
@@ -2112,6 +2147,8 @@ dynamo_thread_init(byte *dstack_in, priv_mcontext_t *mc
     /* under current implementation of process exit, can happen only under
      * debug build, or app_start app_exit interface */
     while (dynamo_exited) {
+        /* FIXME i#2075: free the dstack. */
+        DODEBUG({dynamo_thread_init_during_process_exit = true; });
         /* logging should be safe, though might not actually result in log
          * message */
         DODEBUG_ONCE(LOG(GLOBAL, LOG_THREADS, 1,
@@ -2198,7 +2235,8 @@ dynamo_thread_init(byte *dstack_in, priv_mcontext_t *mc
         IF_CLIENT_INTERFACE_ELSE(client_thread ? "CLIENT " : "", ""),
         get_thread_id(), dcontext);
     LOG(THREAD, LOG_TOP|LOG_THREADS, 1,
-        "DR stack is "PFX"-"PFX"\n", dcontext->dstack - DYNAMORIO_STACK_SIZE, dcontext->dstack);
+        "DR stack is "PFX"-"PFX"\n", dcontext->dstack - DYNAMORIO_STACK_SIZE,
+        dcontext->dstack);
 #endif
 
 #ifdef DEADLOCK_AVOIDANCE
@@ -2497,8 +2535,6 @@ dynamo_thread_exit_common(dcontext_t *dcontext, thread_id_t id,
     LOG(GLOBAL, LOG_STATS|LOG_THREADS, 1, "\tdynamo contexts used: %d\n",
         num_dcontext);
 #else /* UNIX */
-    if (!other_thread)
-        set_thread_private_dcontext(NULL);
     delete_dynamo_context(dcontext_tmp, !on_dstack/*do not free own stack*/);
 #endif /* UNIX */
     os_tls_exit(local_state, other_thread);
@@ -2745,6 +2781,16 @@ dynamorio_take_over_threads(dcontext_t *dcontext)
                "Failed to take over all threads after multiple attempts");
         ASSERT_NOT_REACHED();
     }
+    DO_ONCE({
+        char buf[16];
+        int num_threads = get_num_threads();
+        if (num_threads > 1) { /* avoid for early injection */
+            snprintf(buf, BUFFER_SIZE_ELEMENTS(buf), "%d", num_threads);
+            NULL_TERMINATE_BUFFER(buf);
+            SYSLOG(SYSLOG_INFORMATION, INFO_ATTACHED, 3, buf, get_application_name(),
+                   get_application_pid());
+        }
+    });
 }
 
 /* Called by dynamorio_app_take_over in arch-specific assembly file */

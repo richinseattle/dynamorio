@@ -1,5 +1,5 @@
 /* ******************************************************************************
- * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2017 Google, Inc.  All rights reserved.
  * Copyright (c) 2010-2011 Massachusetts Institute of Technology  All rights reserved.
  * Copyright (c) 2002-2010 VMware, Inc.  All rights reserved.
  * ******************************************************************************/
@@ -798,6 +798,7 @@ instrument_exit(void)
 
     vmvector_delete_vector(GLOBAL_DCONTEXT, client_aux_libs);
     client_aux_libs = NULL;
+    num_client_libs = 0;
 #ifdef WINDOWS
     DELETE_LOCK(client_aux_lib64_lock);
 #endif
@@ -1371,6 +1372,7 @@ instrument_thread_exit(dcontext_t *dcontext)
     HEAP_TYPE_FREE(dcontext, dcontext->client_data, client_data_t,
                    ACCT_OTHER, UNPROTECTED);
     dcontext->client_data = NULL; /* for mutex_wait_contended_lock() */
+    dcontext->is_client_thread_exiting = true; /* for is_using_app_peb() */
 
 #endif /* DEBUG */
 }
@@ -3595,6 +3597,50 @@ dr_recurlock_mark_as_app(void *reclock)
 }
 
 DR_API
+void *
+dr_event_create(void)
+{
+    return (void *)create_event();
+}
+
+DR_API
+bool
+dr_event_destroy(void *event)
+{
+    destroy_event((event_t)event);
+    return true;
+}
+
+DR_API
+bool
+dr_event_wait(void *event)
+{
+    dcontext_t *dcontext = get_thread_private_dcontext();
+    if (IS_CLIENT_THREAD(dcontext))
+        dcontext->client_data->client_thread_safe_for_synch = true;
+    wait_for_event((event_t)event);
+    if (IS_CLIENT_THREAD(dcontext))
+        dcontext->client_data->client_thread_safe_for_synch = false;
+    return true;
+}
+
+DR_API
+bool
+dr_event_signal(void *event)
+{
+    signal_event((event_t)event);
+    return true;
+}
+
+DR_API
+bool
+dr_event_reset(void *event)
+{
+    reset_event((event_t)event);
+    return true;
+}
+
+DR_API
 bool
 dr_mark_safe_to_suspend(void *drcontext, bool enter)
 {
@@ -4600,6 +4646,8 @@ dr_raw_tls_calloc(OUT reg_id_t *tls_register,
     CLIENT_ASSERT(offset != NULL,
                   "dr_raw_tls_calloc: offset cannot be NULL");
     *tls_register = IF_X86_ELSE(SEG_TLS, dr_reg_stolen);
+    if (num_slots == 0)
+        return true;
     return os_tls_calloc(offset, num_slots, alignment);
 }
 
@@ -4607,6 +4655,8 @@ DR_API
 bool
 dr_raw_tls_cfree(uint offset, uint num_slots)
 {
+    if (num_slots == 0)
+        return true;
     return os_tls_cfree(offset, num_slots);
 }
 
@@ -5148,9 +5198,9 @@ dr_insert_clean_call_ex_varg(void *drcontext, instrlist_t *ilist, instr_t *where
     if (TEST(DR_CLEANCALL_NOSAVE_FLAGS, save_flags)) {
         /* even if we remove flag saves we want to keep mcontext shape */
         cci.preserve_mcontext = true;
-        cci.skip_save_aflags = true;
+        cci.skip_save_flags = true;
         /* we assume this implies DF should be 0 already */
-        cci.skip_clear_eflags = true;
+        cci.skip_clear_flags = true;
         /* XXX: should also provide DR_CLEANCALL_NOSAVE_NONAFLAGS to
          * preserve just arith flags on return from a call
          */
@@ -5163,13 +5213,13 @@ dr_insert_clean_call_ex_varg(void *drcontext, instrlist_t *ilist, instr_t *where
         cci.preserve_mcontext = true;
         /* start w/ all */
 #if defined(X64) && defined(WINDOWS)
-        cci.num_xmms_skip = 6;
+        cci.num_simd_skip = 6;
 #else
         /* all 8 (or 16) are scratch */
-        cci.num_xmms_skip = NUM_XMM_REGS;
+        cci.num_simd_skip = NUM_SIMD_REGS;
 #endif
-        for (i=0; i<cci.num_xmms_skip; i++)
-            cci.xmm_skip[i] = true;
+        for (i=0; i<cci.num_simd_skip; i++)
+            cci.simd_skip[i] = true;
         /* now remove those used for param/retval */
 #ifdef X64
         if (TEST(DR_CLEANCALL_NOSAVE_XMM_NONPARAM, save_flags)) {
@@ -5179,16 +5229,16 @@ dr_insert_clean_call_ex_varg(void *drcontext, instrlist_t *ilist, instr_t *where
 # else
             for (i=0; i<3; i++)
 # endif
-                cci.xmm_skip[i] = false;
-            cci.num_xmms_skip -= i;
+                cci.simd_skip[i] = false;
+            cci.num_simd_skip -= i;
         }
         if (TEST(DR_CLEANCALL_NOSAVE_XMM_NONRET, save_flags)) {
             /* xmm0 (and xmm1 for linux) are used for retvals */
-            cci.xmm_skip[0] = false;
-            cci.num_xmms_skip--;
+            cci.simd_skip[0] = false;
+            cci.num_simd_skip--;
 # ifdef UNIX
-            cci.xmm_skip[1] = false;
-            cci.num_xmms_skip--;
+            cci.simd_skip[1] = false;
+            cci.num_simd_skip--;
 # endif
         }
 #endif

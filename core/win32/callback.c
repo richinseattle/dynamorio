@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2017 Google, Inc.  All rights reserved.
  * Copyright (c) 2002-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -4513,7 +4513,7 @@ dump_context_info(CONTEXT *context, file_t file, bool all)
         TESTALL(CONTEXT_XMM_FLAG, context->ContextFlags)) {
         int i, j;
         byte *ymmh_area;
-        for (i=0; i<NUM_XMM_SAVED; i++) {
+        for (i=0; i<NUM_SIMD_SAVED; i++) {
             LOG(file, LOG_ASYNCH, 2, "xmm%d=0x", i);
             /* This would be simpler if we had uint64 fields in dr_xmm_t but
              * that complicates our struct layouts */
@@ -5577,8 +5577,19 @@ intercept_exception(app_state_at_intercept_t *state)
                  * exceptionaddress first since cxt is the one we want for real, we
                  * just want pc for exceptionaddress.
                  */
-                app_pc translated_pc =
-                    recreate_app_pc(dcontext, pExcptRec->ExceptionAddress, f);
+                app_pc translated_pc;
+                if (pExcptRec->ExceptionCode == EXCEPTION_BREAKPOINT &&
+                    cxt->CXT_XIP+1 == (ptr_uint_t)pExcptRec->ExceptionAddress) {
+                    /* i#2126 : In case of an int 2d, the exception address is
+                     * increased by 1 and we make the same.
+                     */
+                    translated_pc =
+                        recreate_app_pc(dcontext, (cache_pc) cxt->CXT_XIP, f) + 1;
+                }
+                else {
+                    translated_pc =
+                        recreate_app_pc(dcontext, pExcptRec->ExceptionAddress, f);
+                }
                 ASSERT(translated_pc != NULL);
                 LOG(THREAD, LOG_ASYNCH, 2, "Translated ExceptionAddress "
                     PFX" to "PFX"\n",
@@ -5836,6 +5847,12 @@ initialize_exception_record(EXCEPTION_RECORD* rec, app_pc exception_address,
         break;
     case ILLEGAL_INSTRUCTION_EXCEPTION:
         rec->ExceptionCode = EXCEPTION_ILLEGAL_INSTRUCTION;
+        break;
+    case GUARD_PAGE_EXCEPTION:
+        rec->ExceptionCode = STATUS_GUARD_PAGE_VIOLATION;
+        rec->NumberParameters = 2;
+        rec->ExceptionInformation[0] = EXCEPTION_EXECUTE_FAULT /* execution tried */;
+        rec->ExceptionInformation[1] = (ptr_uint_t)exception_address;
         break;
     default:
         ASSERT_NOT_REACHED();
@@ -7658,6 +7675,11 @@ callback_interception_unintercept()
 
     free_intercept_list();
 
+    if (doing_detach) {
+        DEBUG_DECLARE(bool ok =)
+            make_writable(interception_code, INTERCEPTION_CODE_SIZE);
+        ASSERT(ok);
+    }
     DODEBUG(callback_interception_unintercepted = true;);
 }
 

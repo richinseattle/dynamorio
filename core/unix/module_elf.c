@@ -1,5 +1,5 @@
 /* *******************************************************************************
- * Copyright (c) 2012-2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2017 Google, Inc.  All rights reserved.
  * Copyright (c) 2011 Massachusetts Institute of Technology  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * *******************************************************************************/
@@ -84,6 +84,12 @@ safe_read(const void *base, size_t size, void *out_buf)
 {
     memcpy(out_buf, base, size);
     return true;
+}
+
+bool
+safe_read_if_fast(const void *base, size_t size, void *out_buf)
+{
+    return safe_read(base, size, out_buf);
 }
 
 #else /* !NOT_DYNAMORIO_CORE_PROPER */
@@ -174,9 +180,14 @@ is_elf_so_header_common(app_pc base, size_t size, bool memory)
         return false;
     }
 
-    /* read the header */
+    /* Read the header.  We used to directly deref if size >= sizeof(ELF_HEADER_TYPE)
+     * but given that we now have safe_read_fast() it's best to always use it and
+     * avoid races (like i#2113).  However, the non-fast version hits deadlock on
+     * memquery during client init, so we use a special routine safe_read_if_fast().
+     */
     if (size >= sizeof(ELF_HEADER_TYPE)) {
-        elf_header = *(ELF_HEADER_TYPE *)base;
+        if (!safe_read_if_fast(base, sizeof(ELF_HEADER_TYPE), &elf_header))
+            return false;
     } else if (size == 0) {
         if (!safe_read(base, sizeof(ELF_HEADER_TYPE), &elf_header))
             return false;
@@ -199,14 +210,17 @@ is_elf_so_header_common(app_pc base, size_t size, bool memory)
          * i.e. 32/64-bit libraries.
          * We check again in privload_map_and_relocate() in loader for nice
          * error message.
+         * Xref i#1345 for supporting mixed libs, which makes more sense for
+         * standalone mode tools like those using drsyms (i#1532) or
+         * dr_map_executable_file, but we just don't support that yet until we
+         * remove our hardcoded type defines in module_elf.h.
          */
-        if (INTERNAL_OPTION(private_loader) &&
-            ((elf_header.e_version != 1) ||
-             (memory && elf_header.e_ehsize != sizeof(ELF_HEADER_TYPE)) ||
-             (memory && elf_header.e_machine != IF_X86_ELSE(IF_X64_ELSE(EM_X86_64,
-                                                                        EM_386),
-                                                            IF_X64_ELSE(EM_AARCH64,
-                                                                        EM_ARM)))))
+        if ((elf_header.e_version != 1) ||
+            (memory && elf_header.e_ehsize != sizeof(ELF_HEADER_TYPE)) ||
+            (memory && elf_header.e_machine != IF_X86_ELSE(IF_X64_ELSE(EM_X86_64,
+                                                                       EM_386),
+                                                           IF_X64_ELSE(EM_AARCH64,
+                                                                       EM_ARM))))
             return false;
 #endif
         /* FIXME - should we add any of these to the check? For real

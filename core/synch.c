@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2017 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -1322,7 +1322,8 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
                     synch_array[i] = SYNCH_WITH_ALL_NOTIFIED;
                 }
                 LOG(THREAD, LOG_SYNCH, 2,
-                    "About to try synch with thread "TIDFMT"\n", threads[i]->id);
+                    "About to try synch with thread #%d/%d "TIDFMT"\n", i, num_threads,
+                    threads[i]->id);
                 synch_res = synch_with_thread(threads[i]->id, false, true,
                                               THREAD_SYNCH_NONE,
                                               desired_synch_state, flags_one);
@@ -2082,12 +2083,10 @@ detach_on_permanent_stack(bool internal, bool do_cleanup)
         }
     }
 
-#ifdef DEBUG
     if (my_idx != -1) {
         /* pre-client thread cleanup (PR 536058) */
         dynamo_thread_exit_pre_client(my_dcontext, my_tr->id);
     }
-#endif
 
     LOG(GLOBAL, LOG_ALL, 1, "Detach: Letting slave threads go native\n");
 #ifdef WINDOWS
@@ -2109,7 +2108,10 @@ detach_on_permanent_stack(bool internal, bool do_cleanup)
 
     stack_free(initstack, DYNAMORIO_STACK_SIZE);
 
+    dynamo_exit_post_detach();
+
     doing_detach = false;
+
     SELF_PROTECT_DATASEC(DATASEC_RARELY_PROT);
     dynamo_detaching_flag = LOCK_FREE_STATE;
     EXITING_DR();

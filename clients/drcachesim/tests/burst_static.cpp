@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2017 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -55,10 +55,10 @@ my_setenv(const char *var, const char *value)
 }
 
 static int
-do_some_work(int i)
+do_some_work(int arg)
 {
     static int iters = 512;
-    double val = (double)i;
+    double val = (double)arg;
     for (int i = 0; i < iters; ++i) {
         val += sin(val);
     }
@@ -76,26 +76,55 @@ main(int argc, const char *argv[])
     if (!my_setenv("DYNAMORIO_OPTIONS", "-stderr_mask 0xc -client_lib ';;-offline'"))
         std::cerr << "failed to set env var!\n";
 
-    std::cerr << "pre-DR init\n";
-    dr_app_setup();
-    assert(!dr_app_running_under_dynamorio());
+    /* We use an outer loop to test re-attaching (i#2157). */
+    for (int j = 0; j < 3; ++j) {
+        std::cerr << "pre-DR init\n";
+        dr_app_setup();
+        assert(!dr_app_running_under_dynamorio());
 
-    for (int i = 0; i < outer_iters; ++i) {
-        if (i == iter_start) {
-            std::cerr << "pre-DR start\n";
-            dr_app_start();
+        for (int i = 0; i < outer_iters; ++i) {
+            if (i == iter_start) {
+                std::cerr << "pre-DR start\n";
+                dr_app_start();
+            }
+            if (i >= iter_start && i <= iter_stop)
+                assert(dr_app_running_under_dynamorio());
+            else
+                assert(!dr_app_running_under_dynamorio());
+            if (do_some_work(i) < 0)
+                std::cerr << "error in computation\n";
+            if (i == iter_stop) {
+                std::cerr << "pre-DR detach\n";
+                dr_app_stop_and_cleanup();
+            }
         }
-        if (i >= iter_start && i <= iter_stop)
-            assert(dr_app_running_under_dynamorio());
-        else
-            assert(!dr_app_running_under_dynamorio());
-        if (do_some_work(i) < 0)
-            std::cerr << "error in computation\n";
-        if (i == iter_stop) {
-            std::cerr << "pre-DR detach\n";
-            dr_app_stop_and_cleanup();
-        }
+        std::cerr << "all done\n";
     }
-    std::cerr << "all done\n";
     return 0;
 }
+
+/* FIXME i#2099: the weak symbol is not supported on Windows. */
+#if defined(UNIX) && defined(TEST_APP_DR_CLIENT_MAIN)
+# ifdef __cplusplus
+extern "C" {
+# endif
+
+/* Test if the drmemtrace_client_main() in drmemtrace will be called. */
+DR_EXPORT WEAK void
+drmemtrace_client_main(client_id_t id, int argc, const char *argv[])
+{
+    std::cerr << "wrong drmemtrace_client_main\n";
+}
+
+/* This dr_client_main should be called instead of the one in tracer.cpp */
+DR_EXPORT void
+dr_client_main(client_id_t id, int argc, const char *argv[])
+{
+    std::cerr << "app dr_client_main\n";
+    drmemtrace_client_main(id, argc, argv);
+}
+
+# ifdef __cplusplus
+}
+# endif
+#endif  /* UNIX && TEST_APP_DR_CLIENT_MAIN */

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2017 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -102,45 +102,55 @@ void
 raw2trace_t::read_and_map_modules(void)
 {
     // Read and load all of the modules.
-    std::string modfilename = indir + std::string(DIRSEP) + MODULE_LIST_FILENAME;
+    std::string modfilename = indir + std::string(DIRSEP) +
+        DRMEMTRACE_MODULE_LIST_FILENAME;
     uint num_mods;
     VPRINT(1, "Reading module file %s\n", modfilename.c_str());
     file_t modfile = dr_open_file(modfilename.c_str(), DR_FILE_READ);
     if (modfile == INVALID_FILE)
         FATAL_ERROR("Failed to open module file %s", modfilename.c_str());
-    if (drmodtrack_offline_read(modfile, NULL, &modhandle, &num_mods) !=
+    if (drmodtrack_offline_read(modfile, NULL, NULL, &modhandle, &num_mods) !=
         DRCOVLIB_SUCCESS)
         FATAL_ERROR("Failed to parse module file %s", modfilename.c_str());
     for (uint i = 0; i < num_mods; i++) {
-        app_pc modbase;
-        size_t modsize;
-        const char *path;
-        if (drmodtrack_offline_lookup(modhandle, i, &modbase, &modsize, &path) !=
-            DRCOVLIB_SUCCESS)
+        drmodtrack_info_t info = {sizeof(info),};
+        if (drmodtrack_offline_lookup(modhandle, i, &info) != DRCOVLIB_SUCCESS)
             FATAL_ERROR("Failed to query module file");
-        if (strcmp(path, "<unknown>") == 0 ||
+        if (strcmp(info.path, "<unknown>") == 0 ||
             // i#2062: VDSO is hard to decode so for now we treat is as non-module.
             // FIXME: currently we're dropping the ifetch data: we need the tracer
             // to identify it instead of us, which requires drmodtrack changes.
-            strcmp(path, "[vdso]") == 0) {
+            strcmp(info.path, "[vdso]") == 0) {
             // We won't be able to decode.
-            modvec.push_back(module_t(path, modbase, NULL, 0));
+            modvec.push_back(module_t(info.path, info.start, NULL, 0));
+        } else if (info.containing_index != i) {
+            // For split segments, drmodtrack_lookup() gave the lowest base addr,
+            // so our PC offsets are from that.  We assume that the single mmap of
+            // the first segment thus includes the other segments and that we don't
+            // need another mmap.
+            VPRINT(1, "Separate segment assumed covered: module %d seg " PFX " = %s\n",
+                   (int)modvec.size(), (ptr_uint_t)info.start, info.path);
+            modvec.push_back(module_t(info.path,
+                                      // We want the low base not segment base.
+                                      modvec[info.containing_index].orig_base,
+                                      // 0 size indicates this is a secondary segment.
+                                      modvec[info.containing_index].map_base, 0));
         } else {
             size_t map_size;
-            byte *base_pc = dr_map_executable_file(path, DR_MAPEXE_SKIP_WRITABLE,
+            byte *base_pc = dr_map_executable_file(info.path, DR_MAPEXE_SKIP_WRITABLE,
                                                    &map_size);
             if (base_pc == NULL) {
                 // We expect to fail to map dynamorio.dll for x64 Windows as it
                 // is built /fixed.  (We could try to have the map succeed w/o relocs,
                 // but we expect to not care enough about code in DR).
-                if (strstr(path, "dynamorio") != NULL)
-                    modvec.push_back(module_t(path, modbase, NULL, 0));
+                if (strstr(info.path, "dynamorio") != NULL)
+                    modvec.push_back(module_t(info.path, info.start, NULL, 0));
                 else
-                    FATAL_ERROR("Failed to map module %s", path);
+                    FATAL_ERROR("Failed to map module %s", info.path);
             } else {
                 VPRINT(1, "Mapped module %d @" PFX " = %s\n", (int)modvec.size(),
-                       (ptr_uint_t)base_pc, path);
-                modvec.push_back(module_t(path, modbase, base_pc, map_size));
+                       (ptr_uint_t)base_pc, info.path);
+                modvec.push_back(module_t(info.path, info.start, base_pc, map_size));
             }
         }
     }
@@ -154,7 +164,7 @@ raw2trace_t::unmap_modules(void)
         FATAL_ERROR("Failed to clean up module table data");
     for (std::vector<module_t>::iterator mvi = modvec.begin();
          mvi != modvec.end(); ++mvi) {
-        if (mvi->map_base != NULL) {
+        if (mvi->map_base != NULL && mvi->map_size != 0) {
             bool ok = dr_unmap_executable_file(mvi->map_base, mvi->map_size);
             if (!ok)
                 WARN("Failed to unmap module %s", mvi->path);
@@ -174,7 +184,7 @@ raw2trace_t::open_thread_log_file(const char *basename)
     CHECK(basename[0] != '/',
           "dir iterator entry %s should not be an absolute path\n", basename);
     // Skip the module list log.
-    if (strcmp(basename, MODULE_LIST_FILENAME) == 0)
+    if (strcmp(basename, DRMEMTRACE_MODULE_LIST_FILENAME) == 0)
         return;
     // Skip any non-.raw in case someone put some other file in there.
     if (strstr(basename, OUTFILE_SUFFIX) == NULL)
@@ -187,6 +197,17 @@ raw2trace_t::open_thread_log_file(const char *basename)
     thread_files.push_back(new std::ifstream(path, std::ifstream::binary));
     if (!(*thread_files.back()))
         FATAL_ERROR("Failed to open thread log file %s", path);
+    // Check version header.
+    offline_entry_t ver_entry;
+    if (!thread_files.back()->read((char*)&ver_entry, sizeof(ver_entry)))
+        FATAL_ERROR("Unable to read thread log file %s", path);
+    if (ver_entry.extended.type != OFFLINE_TYPE_EXTENDED ||
+        ver_entry.extended.ext != OFFLINE_EXT_TYPE_HEADER)
+        FATAL_ERROR("Thread log file %s is corrupted: missing version entry", path);
+    if (ver_entry.extended.value != OFFLINE_FILE_VERSION) {
+        FATAL_ERROR("Version mismatch: expect %d vs %d in file %s",
+                    OFFLINE_FILE_VERSION, (int)ver_entry.extended.value, path);
+    }
     VPRINT(1, "Opened thread log file %s\n", path);
 }
 
@@ -423,23 +444,41 @@ raw2trace_t::merge_and_process_thread_files()
             tidx = next_tidx;
             times[tidx] = 0; // Read from file for this thread's next timestamp.
             size += instru.append_tid(buf, tids[tidx]);
-            buf += size;
+            // We have to write this now before we append any bb entries.
+            CHECK((uint)size < MAX_COMBINED_ENTRIES, "Too many entries");
+            if (!out_file.write((char*)buf_base, size))
+                FATAL_ERROR("Failed to write to output file");
+            buf = buf_base;
+            size = 0;
         }
+        VPRINT(4, "About to read thread %d at pos %d\n",
+               (uint)tids[tidx], (int)thread_files[tidx]->tellg());
         if (!thread_files[tidx]->read((char*)&in_entry, sizeof(in_entry))) {
             if (thread_files[tidx]->eof()) {
+                // Rather than a FATAL_ERROR we try to continue to provide partial
+                // results in case the disk was full or there was some other issue.
+                WARN("Input file for thread %d is truncated", (uint)tids[tidx]);
+                in_entry.extended.type = OFFLINE_TYPE_EXTENDED;
+                in_entry.extended.ext = OFFLINE_EXT_TYPE_FOOTER;
+            } else
+                FATAL_ERROR("Failed to read from file for thread %d", (uint)tids[tidx]);
+        }
+        if (in_entry.extended.type == OFFLINE_TYPE_EXTENDED) {
+            if (in_entry.extended.ext == OFFLINE_EXT_TYPE_FOOTER) {
+                // Push forward to EOF.
+                offline_entry_t entry;
+                if (thread_files[tidx]->read((char*)&entry, sizeof(entry)) ||
+                    !thread_files[tidx]->eof())
+                    FATAL_ERROR("Footer is not the final entry");
                 CHECK(tids[tidx] != INVALID_THREAD_ID, "Missing thread id");
                 VPRINT(2, "Thread %d exit\n", (uint)tids[tidx]);
                 size += instru.append_thread_exit(buf, tids[tidx]);
                 buf += size;
                 --thread_count;
-                if (thread_count == 0)
-                    break;
                 tidx = (uint)thread_files.size(); // Request thread scan.
-                continue;
             } else
-                FATAL_ERROR("Failed to read from input file");
-        }
-        if (in_entry.timestamp.type == OFFLINE_TYPE_TIMESTAMP) {
+                FATAL_ERROR("Invalid extension type %d", (int)in_entry.extended.ext);
+        } else if (in_entry.timestamp.type == OFFLINE_TYPE_TIMESTAMP) {
             VPRINT(2, "Thread %u timestamp 0x" ZHEX64_FORMAT_STRING "\n",
                    (uint)tids[tidx], in_entry.timestamp.usec);
             times[tidx] = in_entry.timestamp.usec;
@@ -486,9 +525,22 @@ raw2trace_t::merge_and_process_thread_files()
 void
 raw2trace_t::do_conversion()
 {
+    trace_entry_t entry;
+    entry.type = TRACE_TYPE_HEADER;
+    entry.size = 0;
+    entry.addr = TRACE_ENTRY_VERSION;
+    if (!out_file.write((char*)&entry, sizeof(entry)))
+        FATAL_ERROR("Failed to write header to output file %s", outname.c_str());
+
     read_and_map_modules();
     open_thread_files();
     merge_and_process_thread_files();
+
+    entry.type = TRACE_TYPE_FOOTER;
+    entry.size = 0;
+    entry.addr = 0;
+    if (!out_file.write((char*)&entry, sizeof(entry)))
+        FATAL_ERROR("Failed to write footer to output file %s", outname.c_str());
 }
 
 raw2trace_t::raw2trace_t(std::string indir_in, std::string outname_in)

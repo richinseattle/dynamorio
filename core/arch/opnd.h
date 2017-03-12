@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2017 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -786,6 +786,8 @@ typedef enum _dr_opnd_flags_t {
     DR_OPND_EXTENDED   = 0x20,
     /** This immediate integer operand should be interpreted as an AArch64 extend type. */
     DR_OPND_IS_EXTEND  = 0x40,
+    /** This immediate integer operand should be interpreted as an AArch64 condition. */
+    DR_OPND_IS_CONDITION = 0x80,
 } dr_opnd_flags_t;
 
 #ifdef DR_FAST_IR

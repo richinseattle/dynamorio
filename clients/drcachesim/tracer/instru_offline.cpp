@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2017 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -41,26 +41,53 @@
 #include "../common/trace_entry.h"
 #include <limits.h> /* for USHRT_MAX */
 #include <stddef.h> /* for offsetof */
+#include <string.h> /* for strlen */
 
 static const ptr_uint_t MAX_INSTR_COUNT = 64*1024;
 
 offline_instru_t::offline_instru_t(void (*insert_load_buf)(void *, instrlist_t *,
                                                            instr_t *, reg_id_t),
+                                   ssize_t (*write_file)(file_t file,
+                                                         const void *data,
+                                                         size_t count),
                                    file_t module_file)
-    : instru_t(insert_load_buf), modfile(module_file)
+    : instru_t(insert_load_buf), write_file_func(write_file), modfile(module_file)
 {
     drcovlib_status_t res = drmodtrack_init();
     DR_ASSERT(res == DRCOVLIB_SUCCESS);
+    DR_ASSERT(write_file != NULL);
     // Ensure every compiler is packing our struct how we want:
     DR_ASSERT(sizeof(offline_entry_t) == 8);
 }
 
 offline_instru_t::~offline_instru_t()
 {
-    drcovlib_status_t res = drmodtrack_dump(modfile);
-    DR_ASSERT(res == DRCOVLIB_SUCCESS);
+    drcovlib_status_t res;
+    size_t size = 8192;
+    char *buf;
+    size_t wrote;
+    do {
+        buf = (char *)dr_global_alloc(size);
+        res = drmodtrack_dump_buf(buf, size, &wrote);
+        if (res == DRCOVLIB_SUCCESS) {
+            ssize_t written = write_file_func(modfile, buf, wrote - 1/*no null*/);
+            DR_ASSERT(written == (ssize_t)strlen(buf));
+        }
+        dr_global_free(buf, size);
+        size *= 2;
+    } while (res == DRCOVLIB_ERROR_BUF_TOO_SMALL);
     res = drmodtrack_exit();
     DR_ASSERT(res == DRCOVLIB_SUCCESS);
+}
+
+bool
+offline_instru_t::custom_module_data
+(void * (*load_cb)(module_data_t *module),
+ int (*print_cb)(void *data, char *dst, size_t max_len),
+ void (*free_cb)(void *data))
+{
+    drcovlib_status_t res = drmodtrack_add_custom_data(load_cb, print_cb, NULL, free_cb);
+    return res == DRCOVLIB_SUCCESS;
 }
 
 size_t
@@ -128,9 +155,11 @@ offline_instru_t::append_tid(byte *buf_ptr, thread_id_t tid)
 int
 offline_instru_t::append_thread_exit(byte *buf_ptr, thread_id_t tid)
 {
-    // The post-process will insert this when it reaches the end of a
-    // per-thread file.
-    return 0;
+    offline_entry_t *entry = (offline_entry_t *) buf_ptr;
+    entry->extended.type = OFFLINE_TYPE_EXTENDED;
+    entry->extended.ext = OFFLINE_EXT_TYPE_FOOTER;
+    entry->extended.value = 0;
+    return sizeof(offline_entry_t);
 }
 
 int
@@ -146,7 +175,18 @@ offline_instru_t::append_iflush(byte *buf_ptr, addr_t start, size_t size)
 }
 
 int
-offline_instru_t::append_header(byte *buf_ptr, thread_id_t tid)
+offline_instru_t::append_thread_header(byte *buf_ptr, thread_id_t tid)
+{
+    offline_entry_t *entry = (offline_entry_t *) buf_ptr;
+    entry->extended.type = OFFLINE_TYPE_EXTENDED;
+    entry->extended.ext = OFFLINE_EXT_TYPE_HEADER;
+    entry->extended.value = OFFLINE_FILE_VERSION;
+    return sizeof(offline_entry_t) +
+        append_unit_header(buf_ptr + sizeof(offline_entry_t), tid);
+}
+
+int
+offline_instru_t::append_unit_header(byte *buf_ptr, thread_id_t tid)
 {
     offline_entry_t *entry = (offline_entry_t *) buf_ptr;
     entry->timestamp.type = OFFLINE_TYPE_TIMESTAMP;
